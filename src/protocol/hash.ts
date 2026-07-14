@@ -12,24 +12,29 @@ function compareKeys(left: string, right: string): number {
   return 0;
 }
 
-function sortKeys(value: unknown): unknown {
+function serializeCanonical(value: unknown): string | undefined {
   if (Array.isArray(value)) {
-    return value.map(sortKeys);
+    return `[${value.map((item) => serializeCanonical(item) ?? "null").join(",")}]`;
   }
 
   if (value !== null && typeof value === "object") {
-    return Object.fromEntries(
-      Object.entries(value)
-        .sort(([left], [right]) => compareKeys(left, right))
-        .map(([key, nestedValue]) => [key, sortKeys(nestedValue)])
-    );
+    const entries = Object.entries(value)
+      .sort(([left], [right]) => compareKeys(left, right))
+      .flatMap(([key, nestedValue]) => {
+        const serializedValue = serializeCanonical(nestedValue);
+        return serializedValue === undefined
+          ? []
+          : [`${JSON.stringify(key)}:${serializedValue}`];
+      });
+
+    return `{${entries.join(",")}}`;
   }
 
-  return value;
+  return JSON.stringify(value);
 }
 
 export function canonicalJson(value: unknown): string {
-  const serialized = JSON.stringify(sortKeys(value));
+  const serialized = serializeCanonical(value);
 
   if (serialized === undefined) {
     throw new TypeError("Value cannot be represented as JSON");
