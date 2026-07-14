@@ -1,5 +1,6 @@
 import { randomUUID, timingSafeEqual } from "node:crypto";
-import { chmod, lstat, mkdir, realpath, rm, writeFile } from "node:fs/promises";
+import { constants } from "node:fs";
+import { lstat, mkdir, open, realpath, rm, writeFile } from "node:fs/promises";
 import path from "node:path";
 
 import multipart from "@fastify/multipart";
@@ -9,6 +10,7 @@ import fastify, {
   type FastifyReply,
   type FastifyRequest
 } from "fastify";
+import { z } from "zod";
 
 import type { ReplayManifest } from "../arena/manifest.js";
 import type { EventBus } from "./events.js";
@@ -19,7 +21,9 @@ import type {
   LockedRunContext
 } from "./orchestrator.js";
 import {
+  ArtifactRefSchema,
   DiagnosisSchema,
+  HashSchema,
   RunEnvelopeSchema,
   SkillSnapshotSchema,
   TraceEventSchema,
@@ -88,26 +92,68 @@ export async function ensurePrivateDirectory(
       throw new Error("Private directory must be a direct child");
     }
   }
-  await mkdir(absolute, { recursive: true, mode: 0o700 });
-  const before = await lstat(absolute);
+  const { root } = path.parse(absolute);
+  const parts = absolute.slice(root.length).split(path.sep).filter((part) => part.length > 0);
+  let cursor = root;
+  let before = await lstat(root);
+  // Portable Node has no openat-style component walk. Validate every lexical
+  // component before descending; a same-uid actor can still race path entries
+  // between checks, so the final directory is also opened no-follow and
+  // inode-checked around descriptor-based chmod.
+  for (const part of parts) {
+    cursor = path.join(cursor, part);
+    try {
+      before = await lstat(cursor);
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+      try {
+        await mkdir(cursor, { mode: 0o700 });
+      } catch (mkdirError) {
+        if ((mkdirError as NodeJS.ErrnoException).code !== "EEXIST") throw mkdirError;
+      }
+      before = await lstat(cursor);
+    }
+    if (!before.isDirectory() || before.isSymbolicLink()
+      || await realpath(cursor) !== cursor) {
+      throw new Error("Private directory ancestor is invalid");
+    }
+  }
   const uid = process.getuid?.();
   if (!before.isDirectory() || before.isSymbolicLink()
     || uid === undefined || before.uid !== uid) {
     throw new Error("Private directory identity is invalid");
   }
-  if ((before.mode & 0o777) !== 0o700) await chmod(absolute, 0o700);
-  const canonical = await realpath(absolute);
-  const after = await lstat(absolute);
-  if (canonical !== absolute
-    || !after.isDirectory()
-    || after.isSymbolicLink()
-    || after.uid !== uid
-    || after.dev !== before.dev
-    || after.ino !== before.ino
-    || (after.mode & 0o777) !== 0o700) {
-    throw new Error("Private directory identity changed");
+  const handle = await open(
+    absolute,
+    constants.O_RDONLY | (constants.O_DIRECTORY ?? 0) | (constants.O_NOFOLLOW ?? 0)
+  );
+  try {
+    const opened = await handle.stat();
+    if (!opened.isDirectory() || opened.uid !== uid
+      || opened.dev !== before.dev || opened.ino !== before.ino) {
+      throw new Error("Private directory identity changed");
+    }
+    if ((opened.mode & 0o777) !== 0o700) await handle.chmod(0o700);
+    const [afterHandle, afterPath, canonical] = await Promise.all([
+      handle.stat(),
+      lstat(absolute),
+      realpath(absolute)
+    ]);
+    if (canonical !== absolute
+      || !afterPath.isDirectory()
+      || afterPath.isSymbolicLink()
+      || afterPath.uid !== uid
+      || afterPath.dev !== opened.dev
+      || afterPath.ino !== opened.ino
+      || afterHandle.dev !== opened.dev
+      || afterHandle.ino !== opened.ino
+      || (afterHandle.mode & 0o777) !== 0o700) {
+      throw new Error("Private directory identity changed");
+    }
+  } finally {
+    await handle.close();
   }
-  return canonical;
+  return absolute;
 }
 
 function safeEqual(actual: string | undefined, expected: string): boolean {
@@ -253,28 +299,39 @@ function reportSnapshot(snapshot: SkillSnapshot): Record<string, unknown> {
   };
 }
 
-function reportRepair(value: unknown): Record<string, unknown> | undefined {
-  if (typeof value !== "object" || value === null || Array.isArray(value)) return undefined;
-  const input = value as Record<string, unknown>;
-  const keys = [
-    "schema",
-    "repair_id",
-    "run_id",
-    "status",
-    "snapshot_hash",
-    "created_at",
-    "changed_paths",
-    "patch_ref",
-    "child_run_id",
-    "new_snapshot_hash"
-  ] as const;
-  const output: Record<string, unknown> = {};
-  for (const key of keys) if (input[key] !== undefined) output[key] = input[key];
-  if (typeof input.error === "object" && input.error !== null
-    && typeof (input.error as Record<string, unknown>).code === "string") {
-    output.error = { code: (input.error as Record<string, unknown>).code };
-  }
-  return output;
+const PortableRepairPathSchema = z.string().min(1).refine((value) => {
+  if (path.posix.isAbsolute(value) || value.includes("\\")) return false;
+  const parts = value.split("/");
+  return parts.every((part) => part.length > 0 && part !== "." && part !== "..");
+}, "Repair changed path must be portable");
+
+const RepairReportBase = {
+  schema: z.literal("arena.repair/v1"),
+  repair_id: z.string().min(1),
+  run_id: z.string().min(1),
+  snapshot_hash: HashSchema,
+  created_at: z.string().datetime(),
+  changed_paths: z.array(PortableRepairPathSchema),
+  patch_ref: ArtifactRefSchema
+};
+
+const RepairReportSchema = z.discriminatedUnion("status", [
+  z.object({ ...RepairReportBase, status: z.literal("pending") }).strict(),
+  z.object({
+    ...RepairReportBase,
+    status: z.literal("approved"),
+    child_run_id: z.string().min(1),
+    new_snapshot_hash: HashSchema
+  }).strict(),
+  z.object({
+    ...RepairReportBase,
+    status: z.literal("failed"),
+    error: z.object({ code: z.string().min(1) }).strict()
+  }).strict()
+]);
+
+function reportRepair(value: unknown): z.infer<typeof RepairReportSchema> {
+  return RepairReportSchema.parse(value);
 }
 
 function lastEventId(request: FastifyRequest): number {
@@ -530,7 +587,8 @@ export async function createServer(
     });
     if (parsedVerdict.run_id !== runId
       || (parsedDiagnosis !== undefined && parsedDiagnosis.run_id !== runId)
-      || (parsedRepair?.run_id !== undefined && parsedRepair.run_id !== runId)) {
+      || (parsedRepair !== undefined && (parsedRepair.run_id !== runId
+        || parsedRepair.snapshot_hash !== parsedRun.snapshot_hash))) {
       throw new Error("Report record membership mismatch");
     }
     for (const [index, event] of parsedTrace.entries()) {

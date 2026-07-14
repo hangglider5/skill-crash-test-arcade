@@ -66,25 +66,29 @@ export function createProcessRepairRegistry(
       async approveAndRerun(repairId) {
         const runId = owners.get(repairId);
         const existing = runId === undefined ? undefined : records.get(runId);
+        if (runId === undefined || typeof existing !== "object" || existing === null
+          || (existing as { status?: unknown }).status !== "pending") {
+          throw new Error(`Repair is not pending: ${repairId}`);
+        }
         try {
           const child = await coordinator.approveAndRerun(repairId);
-          if (runId !== undefined && typeof existing === "object" && existing !== null) {
-            records.set(runId, {
-              ...existing,
-              status: "approved",
-              child_run_id: child.run_id,
-              new_snapshot_hash: child.snapshot_hash
-            });
-          }
+          const { error: _error, child_run_id: _child, new_snapshot_hash: _snapshot, ...base }
+            = existing as Record<string, unknown>;
+          records.set(runId, {
+            ...base,
+            status: "approved",
+            child_run_id: child.run_id,
+            new_snapshot_hash: child.snapshot_hash
+          });
           return child;
         } catch (error) {
-          if (runId !== undefined && typeof existing === "object" && existing !== null) {
-            records.set(runId, {
-              ...existing,
-              status: "failed",
-              error: { code: "REPAIR_APPROVAL_FAILED" }
-            });
-          }
+          const { error: _error, child_run_id: _child, new_snapshot_hash: _snapshot, ...base }
+            = existing as Record<string, unknown>;
+          records.set(runId, {
+            ...base,
+            status: "failed",
+            error: { code: "REPAIR_APPROVAL_FAILED" }
+          });
           throw error;
         }
       }
@@ -145,9 +149,9 @@ export async function createDefaultServerDependencies(
     uploads: path.join(appData, "uploads")
   };
   await ensurePrivateDirectory(appData);
-  await Promise.all(Object.values(directories).map(async (directory) => {
+  for (const directory of Object.values(directories)) {
     await ensurePrivateDirectory(directory, appData);
-  }));
+  }
 
   const manifestFiles = ["dirty-tree.v1.json", "false-green.v1.json", "missing-tool.v1.json"];
   const loaded = await Promise.all(manifestFiles.map(async (name) => {

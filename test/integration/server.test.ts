@@ -142,6 +142,20 @@ function contract(): SkillContract {
   };
 }
 
+function repairRecord(overrides: Record<string, unknown> = {}): Record<string, unknown> {
+  return {
+    schema: "arena.repair/v1",
+    repair_id: "repair_01",
+    run_id: "run_01",
+    status: "pending",
+    snapshot_hash: hashB,
+    created_at: "2026-07-15T00:02:00.000Z",
+    changed_paths: ["SKILL.md"],
+    patch_ref: `sha256:${"d".repeat(64)}`,
+    ...overrides
+  };
+}
+
 function dependencies(overrides: Partial<ServerDependencies> = {}): ServerDependencies {
   const bus = new EventBus();
   const created = envelope("created");
@@ -215,7 +229,7 @@ function dependencies(overrides: Partial<ServerDependencies> = {}): ServerDepend
     },
     async loadVerdict() { return verdict(); },
     async loadDiagnosis() { return diagnosis(); },
-    async loadRepair() { return { schema: "arena.repair/v1", status: "pending" }; }
+    async loadRepair() { return repairRecord(); }
   };
   return { ...base, ...overrides };
 }
@@ -751,7 +765,7 @@ describe("Loopback API", () => {
         runStore: { async readEvents() { return [event(0), event(2, "run.finished")]; } }
       })],
       ["repair run", () => ({
-        async loadRepair() { return { schema: "arena.repair/v1", run_id: "run_other" }; }
+        async loadRepair() { return repairRecord({ run_id: "run_other" }); }
       })]
     ];
     for (const [label, override] of cases) {
@@ -764,6 +778,56 @@ describe("Loopback API", () => {
           ...(override(base).orchestrator ?? base.orchestrator),
           finalizeWorkspace
         }
+      }), { sessionToken: "test-token", appData: root, webDist: undefined });
+      const response = await app.inject({
+        method: "GET", url: "/api/runs/run_01/report",
+        headers: { "x-arena-token": "test-token" }
+      });
+      expect(response.statusCode, label).toBe(500);
+      expect(response.json(), label).toEqual({
+        error: { code: "INTERNAL_ERROR", message: "Request failed safely" }
+      });
+      expect(finalizeWorkspace, label).not.toHaveBeenCalled();
+      await app.close();
+    }
+  });
+
+  it("rejects malformed or contradictory repair report records without cleanup", async () => {
+    const cases: Array<[string, unknown]> = [
+      ["primitive", "pending"],
+      ["missing run id", (() => {
+        const value = repairRecord();
+        delete value.run_id;
+        return value;
+      })()],
+      ["wrong snapshot", repairRecord({ snapshot_hash: hashC })],
+      ["invalid status", repairRecord({ status: "unknown" })],
+      ["wrong schema", repairRecord({ schema: "arena.repair/v0" })],
+      ["contradictory pending child", repairRecord({
+        child_run_id: "run_child",
+        new_snapshot_hash: hashC
+      })],
+      ["approved missing child", repairRecord({ status: "approved" })],
+      ["approved with failed error", repairRecord({
+        status: "approved",
+        child_run_id: "run_child",
+        new_snapshot_hash: hashC,
+        error: { code: "REPAIR_APPROVAL_FAILED" }
+      })],
+      ["failed missing error", repairRecord({ status: "failed" })],
+      ["failed with approved child", repairRecord({
+        status: "failed",
+        error: { code: "REPAIR_APPROVAL_FAILED" },
+        child_run_id: "run_child",
+        new_snapshot_hash: hashC
+      })]
+    ];
+    for (const [label, value] of cases) {
+      const root = await temporaryRoot();
+      const finalizeWorkspace = vi.fn();
+      const app = await createServer(dependencies({
+        orchestrator: { ...dependencies().orchestrator, finalizeWorkspace },
+        async loadRepair() { return value; }
       }), { sessionToken: "test-token", appData: root, webDist: undefined });
       const response = await app.inject({
         method: "GET", url: "/api/runs/run_01/report",
@@ -926,6 +990,68 @@ describe("startCli", () => {
     expect(JSON.stringify(await registry.loadRepair("run_01"))).not.toContain("/Users");
   });
 
+  it("keeps an approved repair terminal and rejects repeated rerun without coordinator re-entry", async () => {
+    const proposal = repairRecord() as ReturnType<typeof repairRecord> & {
+      repair_id: string;
+      run_id: string;
+      status: "pending";
+      snapshot_hash: string;
+      created_at: string;
+      changed_paths: string[];
+      patch_ref: `sha256:${string}`;
+    };
+    const child = { ...envelope("created"), run_id: "run_child", parent_run_id: "run_01" };
+    const approveAndRerun = vi.fn(async () => child);
+    const registry = createProcessRepairRegistry({
+      async createRepairFork() { return proposal; },
+      approveAndRerun
+    });
+
+    await registry.repairs.createRepairFork("run_01");
+    await expect(registry.repairs.approveAndRerun("repair_01")).resolves.toEqual(child);
+    const approved = await registry.loadRepair("run_01");
+    await expect(registry.repairs.approveAndRerun("repair_01")).rejects.toThrow();
+    expect(approveAndRerun).toHaveBeenCalledTimes(1);
+    expect(await registry.loadRepair("run_01")).toEqual(approved);
+    expect(approved).toMatchObject({
+      status: "approved",
+      child_run_id: "run_child",
+      new_snapshot_hash: hashB
+    });
+  });
+
+  it("keeps a failed repair terminal and rejects repeated rerun without coordinator re-entry", async () => {
+    const proposal = repairRecord() as ReturnType<typeof repairRecord> & {
+      repair_id: string;
+      run_id: string;
+      status: "pending";
+      snapshot_hash: string;
+      created_at: string;
+      changed_paths: string[];
+      patch_ref: `sha256:${string}`;
+    };
+    const approveAndRerun = vi.fn(async () => {
+      throw new Error("first approval failed");
+    });
+    const registry = createProcessRepairRegistry({
+      async createRepairFork() { return proposal; },
+      approveAndRerun
+    });
+
+    await registry.repairs.createRepairFork("run_01");
+    await expect(registry.repairs.approveAndRerun("repair_01")).rejects.toThrow();
+    const failed = await registry.loadRepair("run_01");
+    await expect(registry.repairs.approveAndRerun("repair_01")).rejects.toThrow();
+    expect(approveAndRerun).toHaveBeenCalledTimes(1);
+    expect(await registry.loadRepair("run_01")).toEqual(failed);
+    expect(failed).toMatchObject({
+      status: "failed",
+      error: { code: "REPAIR_APPROVAL_FAILED" }
+    });
+    expect(failed).not.toHaveProperty("child_run_id");
+    expect(failed).not.toHaveProperty("new_snapshot_hash");
+  });
+
   it("resolves manifests and production web assets from the installation root after chdir", async () => {
     const projectRoot = process.cwd();
     const webDist = path.join(projectRoot, "dist", "web");
@@ -981,6 +1107,19 @@ describe("startCli", () => {
     await symlink(outside, path.join(badRoot, "imports"));
     await expect(createDefaultServerDependencies(badRoot)).rejects.toThrow();
     expect(await readdir(outside)).toEqual([]);
+  });
+
+  it("rejects a symlinked existing ancestor without recursively creating outside it", async () => {
+    const root = await temporaryRoot();
+    const outside = await temporaryRoot();
+    await symlink(outside, path.join(root, "linked-parent"));
+    const escapedAppData = path.join(root, "linked-parent", "escaped-child");
+
+    await expect(createDefaultServerDependencies(escapedAppData)).rejects.toThrow();
+    expect(await readdir(outside)).toEqual([]);
+    await expect(lstat(path.join(outside, "escaped-child"))).rejects.toMatchObject({
+      code: "ENOENT"
+    });
   });
 
   it("assembles the real process-local server dependencies without invoking Codex", async () => {
