@@ -1,5 +1,5 @@
 import { randomBytes } from "node:crypto";
-import { mkdir, stat } from "node:fs/promises";
+import { stat } from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -19,8 +19,14 @@ import { EventBus } from "./events.js";
 import { importSkill } from "./importer.js";
 import { RunOrchestrator } from "./orchestrator.js";
 import { RepairCoordinator } from "./repair.js";
-import { createServer, type ServerDependencies } from "./server.js";
+import {
+  createServer,
+  ensurePrivateDirectory,
+  type ServerDependencies
+} from "./server.js";
 import { computeSnapshotExecutionFingerprint } from "./snapshot-identity.js";
+
+const INSTALLATION_ROOT = path.resolve(fileURLToPath(new URL("../../", import.meta.url)));
 
 interface CliServer {
   listen(options: { readonly host: string; readonly port: number }): Promise<unknown>;
@@ -42,6 +48,49 @@ interface CliOptions {
   readonly appData: string;
   readonly token: string | undefined;
   readonly noOpen: boolean;
+}
+
+export function createProcessRepairRegistry(
+  coordinator: Pick<RepairCoordinator, "createRepairFork" | "approveAndRerun">
+): Pick<ServerDependencies, "repairs" | "loadRepair"> {
+  const records = new Map<string, unknown>();
+  const owners = new Map<string, string>();
+  return {
+    repairs: {
+      async createRepairFork(runId) {
+        const value = await coordinator.createRepairFork(runId);
+        records.set(runId, value);
+        owners.set(value.repair_id, runId);
+        return value;
+      },
+      async approveAndRerun(repairId) {
+        const runId = owners.get(repairId);
+        const existing = runId === undefined ? undefined : records.get(runId);
+        try {
+          const child = await coordinator.approveAndRerun(repairId);
+          if (runId !== undefined && typeof existing === "object" && existing !== null) {
+            records.set(runId, {
+              ...existing,
+              status: "approved",
+              child_run_id: child.run_id,
+              new_snapshot_hash: child.snapshot_hash
+            });
+          }
+          return child;
+        } catch (error) {
+          if (runId !== undefined && typeof existing === "object" && existing !== null) {
+            records.set(runId, {
+              ...existing,
+              status: "failed",
+              error: { code: "REPAIR_APPROVAL_FAILED" }
+            });
+          }
+          throw error;
+        }
+      }
+    },
+    loadRepair: async (runId) => records.get(runId)
+  };
 }
 
 function parseArgs(argv: readonly string[]): CliOptions {
@@ -92,23 +141,22 @@ export async function createDefaultServerDependencies(
     artifacts: path.join(appData, "artifacts"),
     workspaces: path.join(appData, "workspaces"),
     runner: path.join(appData, "runner-output"),
-    repairs: path.join(appData, "repairs")
+    repairs: path.join(appData, "repairs"),
+    uploads: path.join(appData, "uploads")
   };
-  await mkdir(appData, { recursive: true, mode: 0o700 });
+  await ensurePrivateDirectory(appData);
   await Promise.all(Object.values(directories).map(async (directory) => {
-    await mkdir(directory, { recursive: true, mode: 0o700 });
+    await ensurePrivateDirectory(directory, appData);
   }));
 
   const manifestFiles = ["dirty-tree.v1.json", "false-green.v1.json", "missing-tool.v1.json"];
   const loaded = await Promise.all(manifestFiles.map(async (name) => {
-    return loadManifest(path.resolve("manifests", name));
+    return loadManifest(path.join(INSTALLATION_ROOT, "manifests", name));
   }));
   const manifests = new Map(loaded.map((value) => [value.manifest.id, value]));
   const snapshots = new Map<string, SkillSnapshot>();
   const verdicts = new Map<string, VerdictBundle>();
   const diagnoses = new Map<string, Diagnosis>();
-  const repairs = new Map<string, unknown>();
-  const repairOwners = new Map<string, string>();
   const runIds = new Set<string>();
   const runStore = new RunStore(directories.runs);
   const artifactStore = new ArtifactStore(directories.artifacts);
@@ -224,6 +272,7 @@ export async function createDefaultServerDependencies(
     createChildRun: createRun,
     executeChildRun: execute
   });
+  const repairRegistry = createProcessRepairRegistry(repairCoordinator);
 
   return {
     preflight: async () => runPreflight({ appDataDir: appData }),
@@ -264,35 +313,14 @@ export async function createDefaultServerDependencies(
         return value;
       }
     },
-    repairs: {
-      async createRepairFork(runId) {
-        const value = await repairCoordinator.createRepairFork(runId);
-        repairs.set(runId, value);
-        repairOwners.set(value.repair_id, runId);
-        return value;
-      },
-      async approveAndRerun(repairId) {
-        const child = await repairCoordinator.approveAndRerun(repairId);
-        const runId = repairOwners.get(repairId);
-        const existing = runId === undefined ? undefined : repairs.get(runId);
-        if (runId !== undefined && typeof existing === "object" && existing !== null) {
-          repairs.set(runId, {
-            ...existing,
-            status: "approved",
-            child_run_id: child.run_id,
-            new_snapshot_hash: child.snapshot_hash
-          });
-        }
-        return child;
-      }
-    },
+    repairs: repairRegistry.repairs,
     loadVerdict: async (runId) => {
       const value = verdicts.get(runId);
       if (value === undefined) throw new Error(`Verdict is unavailable: ${runId}`);
       return value;
     },
     loadDiagnosis: async (runId) => diagnoses.get(runId),
-    loadRepair: async (runId) => repairs.get(runId)
+    loadRepair: repairRegistry.loadRepair
   };
 }
 
@@ -305,7 +333,7 @@ const defaultRuntime: CliRuntime = {
 };
 
 async function productionWebDist(): Promise<string | undefined> {
-  const candidate = path.resolve("dist/web");
+  const candidate = path.join(INSTALLATION_ROOT, "dist", "web");
   try {
     return (await stat(candidate)).isDirectory() ? candidate : undefined;
   } catch {

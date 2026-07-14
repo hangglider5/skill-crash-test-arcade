@@ -1,5 +1,5 @@
 import { randomUUID, timingSafeEqual } from "node:crypto";
-import { mkdir, rm, writeFile } from "node:fs/promises";
+import { chmod, lstat, mkdir, realpath, rm, writeFile } from "node:fs/promises";
 import path from "node:path";
 
 import multipart from "@fastify/multipart";
@@ -33,6 +33,7 @@ import {
   type VerdictBundle
 } from "../protocol/index.js";
 import type { PreflightResult } from "../codex/types.js";
+import { validateSnapshotIdentity } from "./snapshot-identity.js";
 
 const MAX_JSON_BYTES = 5 * 1024 * 1024;
 const MAX_ARCHIVE_BYTES = 16 * 1024 * 1024;
@@ -74,6 +75,39 @@ export interface ServerOptions {
   readonly appData: string;
   readonly webDist?: string | undefined;
   readonly idFactory?: (() => string) | undefined;
+}
+
+export async function ensurePrivateDirectory(
+  configured: string,
+  directParent?: string
+): Promise<string> {
+  const absolute = path.resolve(configured);
+  if (directParent !== undefined) {
+    const parent = path.resolve(directParent);
+    if (path.dirname(absolute) !== parent || path.basename(absolute).length === 0) {
+      throw new Error("Private directory must be a direct child");
+    }
+  }
+  await mkdir(absolute, { recursive: true, mode: 0o700 });
+  const before = await lstat(absolute);
+  const uid = process.getuid?.();
+  if (!before.isDirectory() || before.isSymbolicLink()
+    || uid === undefined || before.uid !== uid) {
+    throw new Error("Private directory identity is invalid");
+  }
+  if ((before.mode & 0o777) !== 0o700) await chmod(absolute, 0o700);
+  const canonical = await realpath(absolute);
+  const after = await lstat(absolute);
+  if (canonical !== absolute
+    || !after.isDirectory()
+    || after.isSymbolicLink()
+    || after.uid !== uid
+    || after.dev !== before.dev
+    || after.ino !== before.ino
+    || (after.mode & 0o777) !== 0o700) {
+    throw new Error("Private directory identity changed");
+  }
+  return canonical;
 }
 
 function safeEqual(actual: string | undefined, expected: string): boolean {
@@ -143,31 +177,63 @@ function terminal(event: TraceEvent): boolean {
 }
 
 function sendEvent(reply: FastifyReply, event: TraceEvent): void {
-  reply.raw.write(`id: ${event.seq}\ndata: ${canonicalJson(redact(event))}\n\n`);
+  reply.raw.write(`id: ${event.seq}\ndata: ${canonicalJson(sanitize(event, []))}\n\n`);
 }
 
 const SENSITIVE_KEY = /(?:^|_)(?:token|secret|password|api_?key|codex_home)(?:$|_)/iu;
 const SECRET_VALUE = /(?:OPENAI_API_KEY|CODEX_HOME|sk-[A-Za-z0-9_-]+)/u;
-const EMBEDDED_ABSOLUTE_PATH = /(?:^|\s)\/(?:Users|home|private|tmp|var)\//u;
+const EMBEDDED_ABSOLUTE_PATH = /(?:^|[^A-Za-z0-9._/-])\/(?!\/)[^\s"'`,;)\]}]+/u;
+const FILE_URI = /file:\/\/[^\s"'`,;)\]}]*/u;
 
 /** Report/SSE data is a strict JSON projection; suspicious keys are removed recursively. */
-function redact(value: unknown): unknown {
-  if (Array.isArray(value)) return value.map(redact);
+function sanitize(value: unknown, exactSecrets: readonly string[]): unknown {
+  if (Array.isArray(value)) return value.map((child) => sanitize(child, exactSecrets));
   if (typeof value === "object" && value !== null) {
     const output: Record<string, unknown> = {};
     for (const [key, child] of Object.entries(value)) {
       if (SENSITIVE_KEY.test(key)) continue;
-      output[key] = redact(child);
+      output[key] = sanitize(child, exactSecrets);
     }
     return output;
   }
   if (typeof value === "string") {
-    if (SECRET_VALUE.test(value) || path.isAbsolute(value) || value.startsWith("file://")
+    if (exactSecrets.some((secret) => secret.length > 0 && value.includes(secret))
+      || SECRET_VALUE.test(value)
+      || path.isAbsolute(value)
+      || FILE_URI.test(value)
       || EMBEDDED_ABSOLUTE_PATH.test(value)) {
       return "[REDACTED]";
     }
   }
   return value;
+}
+
+function reportTrace(event: TraceEvent): Record<string, unknown> {
+  return {
+    v: event.v,
+    run_id: event.run_id,
+    seq: event.seq,
+    phase: event.phase,
+    kind: event.kind,
+    actor: event.actor,
+    ...(event.span_id === undefined ? {} : { span_id: event.span_id }),
+    artifacts: event.artifacts
+  };
+}
+
+function reportVerdict(verdict: VerdictBundle): Record<string, unknown> {
+  const common = {
+    schema: verdict.schema,
+    run_id: verdict.run_id,
+    status: verdict.status,
+    hard_gate_failures: verdict.hard_gate_failures,
+    dimensions: verdict.dimensions,
+    verifier_results: verdict.verifier_results,
+    evidence: verdict.evidence
+  };
+  return verdict.status === "error"
+    ? { ...common, error: { code: verdict.error.code } }
+    : { ...common, score: verdict.score };
 }
 
 function reportSnapshot(snapshot: SkillSnapshot): Record<string, unknown> {
@@ -215,7 +281,8 @@ function lastEventId(request: FastifyRequest): number {
   const raw = request.headers["last-event-id"];
   if (Array.isArray(raw) || raw === undefined) return -1;
   if (!/^[0-9]+$/u.test(raw)) return -1;
-  return Number(raw);
+  const value = Number(raw);
+  return Number.isSafeInteger(value) && value >= 0 ? value : -1;
 }
 
 export async function createServer(
@@ -223,7 +290,39 @@ export async function createServer(
   options: ServerOptions
 ): Promise<FastifyInstance> {
   if (options.sessionToken.length === 0) throw new Error("Session token is required");
+  const appData = await ensurePrivateDirectory(options.appData);
   const app = fastify({ bodyLimit: MAX_ARCHIVE_BYTES, logger: false });
+  app.removeContentTypeParser("application/json");
+  app.addContentTypeParser(
+    "application/json",
+    { parseAs: "string", bodyLimit: MAX_JSON_BYTES },
+    (_request, body, done) => {
+      try {
+        done(null, JSON.parse(typeof body === "string" ? body : body.toString("utf8")));
+      } catch (error) {
+        done(error as Error, undefined);
+      }
+    }
+  );
+  const cleanupAttempts = new Map<string, Promise<boolean>>();
+  const scheduleCleanup = (runId: string): void => {
+    if (cleanupAttempts.has(runId)) return;
+    let attempt!: Promise<boolean>;
+    attempt = Promise.resolve().then(async () => {
+      await dependencies.orchestrator.finalizeWorkspace(
+        runId,
+        { report_exported: true }
+      );
+    }).then(
+      () => true,
+      () => {
+        if (cleanupAttempts.get(runId) === attempt) cleanupAttempts.delete(runId);
+        return false;
+      }
+    );
+    cleanupAttempts.set(runId, attempt);
+    void attempt;
+  };
   await app.register(multipart, {
     limits: { files: 1, fields: 2, fileSize: MAX_ARCHIVE_BYTES }
   });
@@ -251,12 +350,11 @@ export async function createServer(
 
   app.get("/api/health", async () => dependencies.preflight());
 
-  app.post("/api/imports", { bodyLimit: MAX_ARCHIVE_BYTES }, async (request, reply) => {
-    const importsRoot = path.join(path.resolve(options.appData), "imports");
+  app.post("/api/imports", async (request, reply) => {
+    const importsRoot = path.join(appData, "imports");
     let imported: SkillSnapshot;
     if (request.isMultipart()) {
-      const uploadRoot = path.join(path.resolve(options.appData), "uploads");
-      await mkdir(uploadRoot, { recursive: true, mode: 0o700 });
+      const uploadRoot = await ensurePrivateDirectory(path.join(appData, "uploads"), appData);
       const part = await request.file();
       if (part === undefined) throw new TypeError("ZIP upload is required");
       const bytes = await part.toBuffer();
@@ -313,36 +411,57 @@ export async function createServer(
     const after = lastEventId(request);
     const buffered = new Map<number, TraceEvent>();
     let replaying = true;
+    let ready = false;
     let closed = false;
+    let terminalSeen = false;
     const sent = new Set<number>();
-    const close = (): void => {
-      if (closed) return;
-      closed = true;
-      unsubscribe();
-      reply.raw.end();
-    };
-    const unsubscribe = dependencies.eventBus.subscribe(runId, (value) => {
+    let subscribed = true;
+    const rawUnsubscribe = dependencies.eventBus.subscribe(runId, (value) => {
       const event = value as TraceEvent;
-      if (event.seq <= after || sent.has(event.seq) || closed) return;
-      if (replaying) {
-        buffered.set(event.seq, event);
+      const isTerminal = terminal(event);
+      if (isTerminal) terminalSeen = true;
+      if (closed) return;
+      if (!ready || replaying) {
+        if (event.seq > after) buffered.set(event.seq, event);
+        return;
+      }
+      if (event.seq <= after || sent.has(event.seq)) {
+        if (isTerminal) close();
         return;
       }
       sent.add(event.seq);
       sendEvent(reply, event);
-      if (terminal(event)) close();
+      if (isTerminal) close();
     });
-    reply.raw.on("close", unsubscribe);
-    reply.hijack();
-    reply.raw.statusCode = 200;
-    reply.raw.setHeader("content-type", "text/event-stream; charset=utf-8");
-    reply.raw.setHeader("cache-control", "no-cache, no-transform");
-    reply.raw.setHeader("connection", "keep-alive");
+    const unsubscribe = (): void => {
+      if (!subscribed) return;
+      subscribed = false;
+      rawUnsubscribe();
+    };
+    const close = (): void => {
+      if (closed) return;
+      closed = true;
+      unsubscribe();
+      if (ready && !reply.raw.writableEnded) reply.raw.end();
+    };
+    reply.raw.once("close", () => {
+      closed = true;
+      unsubscribe();
+    });
     try {
-      const persisted = await dependencies.runStore.readEvents(runId);
+      const persisted = (await dependencies.runStore.readEvents(runId))
+        .map((event) => TraceEventSchema.parse(event));
+      if (closed) return;
       for (const event of persisted) {
+        if (terminal(event)) terminalSeen = true;
         if (event.seq > after && !buffered.has(event.seq)) buffered.set(event.seq, event);
       }
+      reply.hijack();
+      reply.raw.statusCode = 200;
+      reply.raw.setHeader("content-type", "text/event-stream; charset=utf-8");
+      reply.raw.setHeader("cache-control", "no-cache, no-transform");
+      reply.raw.setHeader("connection", "keep-alive");
+      ready = true;
       // Stay in buffering mode through the complete replay flush. A synchronous
       // live publication caused while serializing an older event is drained on
       // the next pass and therefore cannot overtake the replay sequence.
@@ -360,8 +479,10 @@ export async function createServer(
         }
       }
       replaying = false;
+      if (terminalSeen && !closed) close();
     } catch (error) {
-      close();
+      unsubscribe();
+      if (ready) close();
       throw error;
     }
   });
@@ -382,6 +503,12 @@ export async function createServer(
 
   app.get("/api/runs/:id/report", async (request, reply) => {
     const runId = (request.params as { id: string }).id;
+    let clientAborted = request.raw.aborted;
+    let deliveryClosed = false;
+    request.raw.once("aborted", () => { clientAborted = true; });
+    reply.raw.once("close", () => {
+      if (!reply.raw.writableFinished) deliveryClosed = true;
+    });
     const context = dependencies.orchestrator.getRunContext(runId);
     const [snapshot, verdict, diagnosis, repair, trace] = await Promise.all([
       dependencies.loadSnapshot(context.envelope.snapshot_hash),
@@ -396,19 +523,46 @@ export async function createServer(
     const parsedDiagnosis = diagnosis === undefined ? undefined : DiagnosisSchema.parse(diagnosis);
     const parsedTrace = trace.map((event) => TraceEventSchema.parse(event));
     const parsedRepair = repair === undefined ? undefined : reportRepair(repair);
-    const report = redact({
+    if (parsedRun.run_id !== runId) throw new Error("Report run context mismatch");
+    validateSnapshotIdentity(parsedSnapshot, {
+      expected_source_hash: parsedRun.snapshot_hash,
+      expected_execution_fingerprint: context.snapshot_execution_fingerprint
+    });
+    if (parsedVerdict.run_id !== runId
+      || (parsedDiagnosis !== undefined && parsedDiagnosis.run_id !== runId)
+      || (parsedRepair?.run_id !== undefined && parsedRepair.run_id !== runId)) {
+      throw new Error("Report record membership mismatch");
+    }
+    for (const [index, event] of parsedTrace.entries()) {
+      if (event.run_id !== runId || event.seq !== index) {
+        throw new Error("Report Trace membership mismatch");
+      }
+    }
+    const reportSecrets = [
+      options.sessionToken,
+      parsedSnapshot.imported_path,
+      parsedSnapshot.source.uri
+    ];
+    const report = sanitize({
       schema: "arena.report/v1",
       run: parsedRun,
       manifest_id: context.manifest_id,
       snapshot: reportSnapshot(parsedSnapshot),
-      verdict: parsedVerdict,
+      verdict: reportVerdict(parsedVerdict),
       ...(parsedDiagnosis === undefined ? {} : { diagnosis: parsedDiagnosis }),
       ...(parsedRepair === undefined ? {} : { repair: parsedRepair }),
-      trace: parsedTrace
-    });
+      trace: parsedTrace.map(reportTrace)
+    }, reportSecrets);
     const serialized = canonicalJson(report);
-    if (serialized.includes(options.sessionToken)) throw new Error("Report redaction failed");
-    await dependencies.orchestrator.finalizeWorkspace(runId, { report_exported: true });
+    if (reportSecrets.some((secret) => secret.length > 0 && serialized.includes(secret))) {
+      throw new Error("Report redaction failed");
+    }
+    reply.raw.once("finish", () => {
+      if (!clientAborted && !deliveryClosed && !reply.raw.destroyed
+        && reply.raw.statusCode === 200) {
+        scheduleCleanup(runId);
+      }
+    });
     return reply.type("application/json").send(serialized);
   });
 

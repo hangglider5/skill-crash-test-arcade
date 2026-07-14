@@ -1,4 +1,15 @@
-import { mkdtemp, readFile, realpath, rm } from "node:fs/promises";
+import {
+  chmod,
+  lstat,
+  mkdir,
+  mkdtemp,
+  readFile,
+  readdir,
+  realpath,
+  rm,
+  symlink,
+  writeFile
+} from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 
@@ -11,8 +22,13 @@ import {
 } from "../../src/core/server.js";
 import {
   createDefaultServerDependencies,
+  createProcessRepairRegistry,
   startCli
 } from "../../src/core/cli.js";
+import {
+  computeSnapshotExecutionFingerprint,
+  computeSnapshotSourceHash
+} from "../../src/core/snapshot-identity.js";
 import type {
   Diagnosis,
   RunEnvelope,
@@ -24,9 +40,11 @@ import type {
 
 const roots: string[] = [];
 const hashA = "a".repeat(64);
-const hashB = "b".repeat(64);
 const hashC = "c".repeat(64);
 const secretSource = "/Users/alice/private/source";
+const snapshotSource = { kind: "local" as const, uri: `file://${secretSource}` };
+const snapshotFiles = [{ path: "SKILL.md", bytes: 8, sha256: hashA }];
+const hashB = computeSnapshotSourceHash({ source: snapshotSource, files: snapshotFiles });
 
 async function temporaryRoot(): Promise<string> {
   const root = await realpath(await mkdtemp(path.join(tmpdir(), "scta-server-")));
@@ -37,14 +55,16 @@ async function temporaryRoot(): Promise<string> {
 function snapshot(): SkillSnapshot {
   return {
     schema: "arena.skill-snapshot/v1",
-    source: { kind: "local", uri: `file://${secretSource}` },
+    source: snapshotSource,
     entrypoint: "SKILL.md",
     license: "MIT",
-    files: [{ path: "SKILL.md", bytes: 8, sha256: hashA }],
+    files: snapshotFiles,
     source_hash: hashB,
     imported_path: secretSource
   };
 }
+
+const trustedFingerprint = computeSnapshotExecutionFingerprint(snapshot());
 
 function envelope(state: RunEnvelope["state"] = "completed"): RunEnvelope {
   return {
@@ -157,13 +177,13 @@ function dependencies(overrides: Partial<ServerDependencies> = {}): ServerDepend
         manifest_hash: hashA,
         fixture_hash: hashC,
         runner: { adapter: "codex-cli", model: "gpt-5.6" },
-        snapshot_execution_fingerprint: "trusted-fingerprint"
+        snapshot_execution_fingerprint: trustedFingerprint
       };
     },
     orchestrator: {
       async createRun(request) {
         expect(request.expected_lineage.snapshot_execution_fingerprint)
-          .toBe("trusted-fingerprint");
+          .toBe(trustedFingerprint);
         return created;
       },
       async execute() { return verdict(); },
@@ -171,7 +191,7 @@ function dependencies(overrides: Partial<ServerDependencies> = {}): ServerDepend
         return {
           envelope: envelope(),
           manifest_id: "repo-dirty-tree-v1",
-          snapshot_execution_fingerprint: "trusted-fingerprint"
+          snapshot_execution_fingerprint: trustedFingerprint
         };
       },
       async finalizeWorkspace() { return { removed: true }; }
@@ -206,6 +226,27 @@ afterEach(async () => {
 });
 
 describe("Loopback API", () => {
+  it("serves static UI assets without weakening API token rules", async () => {
+    const root = await temporaryRoot();
+    const webDist = path.join(root, "web");
+    await mkdir(webDist, { mode: 0o700 });
+    await mkdir(path.join(webDist, "api"), { mode: 0o700 });
+    await writeFile(path.join(webDist, "index.html"), "<main>Arena UI</main>");
+    await writeFile(path.join(webDist, "api", "leak.txt"), "must be protected");
+    const app = await createServer(dependencies(), {
+      sessionToken: "test-token", appData: root, webDist
+    });
+
+    const page = await app.inject({ method: "GET", url: "/?token=test-token" });
+    expect(page.statusCode).toBe(200);
+    expect(page.body).toContain("Arena UI");
+    expect((await app.inject({
+      method: "GET", url: "/api/manifests?token=test-token"
+    })).statusCode).toBe(401);
+    expect((await app.inject({ method: "GET", url: "/api/leak.txt" })).statusCode).toBe(401);
+    await app.close();
+  });
+
   it("leaves health public and rejects every sensitive route without the header token", async () => {
     const root = await temporaryRoot();
     const app = await createServer(dependencies(), {
@@ -330,6 +371,95 @@ describe("Loopback API", () => {
     await app.close();
   });
 
+  it("rejects a symlinked upload root before writing any multipart bytes outside app-data", async () => {
+    const root = await temporaryRoot();
+    const outside = await temporaryRoot();
+    await symlink(outside, path.join(root, "uploads"));
+    const importSkill = vi.fn(async () => snapshot());
+    const app = await createServer(dependencies({ importSkill }), {
+      sessionToken: "test-token", appData: root, webDist: undefined
+    });
+    const boundary = "arena-symlink-boundary";
+    const body = Buffer.from([
+      `--${boundary}\r\n`,
+      "Content-Disposition: form-data; name=\"file\"; filename=\"skill.zip\"\r\n",
+      "Content-Type: application/zip\r\n\r\n",
+      "zip-bytes\r\n",
+      `--${boundary}--\r\n`
+    ].join(""));
+
+    const response = await app.inject({
+      method: "POST", url: "/api/imports",
+      headers: {
+        "x-arena-token": "test-token",
+        "content-type": `multipart/form-data; boundary=${boundary}`
+      },
+      payload: body
+    });
+    expect(response.statusCode).toBe(500);
+    expect(importSkill).not.toHaveBeenCalled();
+    expect(await readdir(outside)).toEqual([]);
+    await app.close();
+  });
+
+  it("rejects oversized malformed JSON at the transport limit before parsing", async () => {
+    const root = await temporaryRoot();
+    const importSkill = vi.fn(async () => snapshot());
+    const app = await createServer(dependencies({ importSkill }), {
+      sessionToken: "test-token", appData: root, webDist: undefined
+    });
+
+    const response = await app.inject({
+      method: "POST", url: "/api/imports",
+      headers: {
+        "x-arena-token": "test-token",
+        "content-type": "application/json"
+      },
+      payload: `{${" ".repeat(6 * 1024 * 1024)}`
+    });
+    expect(response.statusCode).toBe(413);
+    expect(response.json()).toEqual({
+      error: { code: "PAYLOAD_TOO_LARGE", message: "Request payload is too large" }
+    });
+    expect(importSkill).not.toHaveBeenCalled();
+    await app.close();
+  });
+
+  it("allows multipart ZIP bodies above the JSON cap and below the archive cap", async () => {
+    const root = await temporaryRoot();
+    const payload = Buffer.alloc(6 * 1024 * 1024, 0x61);
+    const importSkill = vi.fn(async (request) => {
+      if (request.kind !== "zip") throw new Error("expected ZIP import");
+      expect((await readFile(request.path)).byteLength).toBe(payload.byteLength);
+      return snapshot();
+    });
+    const app = await createServer(dependencies({ importSkill }), {
+      sessionToken: "test-token", appData: root, webDist: undefined
+    });
+    const boundary = "arena-large-boundary";
+    const body = Buffer.concat([
+      Buffer.from([
+        `--${boundary}\r\n`,
+        "Content-Disposition: form-data; name=\"file\"; filename=\"skill.zip\"\r\n",
+        "Content-Type: application/zip\r\n\r\n"
+      ].join("")),
+      payload,
+      Buffer.from(`\r\n--${boundary}--\r\n`)
+    ]);
+
+    const response = await app.inject({
+      method: "POST", url: "/api/imports",
+      headers: {
+        "x-arena-token": "test-token",
+        "content-type": `multipart/form-data; boundary=${boundary}`
+      },
+      payload: body
+    });
+    expect(response.statusCode).toBe(201);
+    expect(importSkill).toHaveBeenCalledTimes(1);
+    await app.close();
+  });
+
   it("buffers live SSE events before replay, deduplicates by seq, honors Last-Event-ID, and closes terminal streams", async () => {
     const root = await temporaryRoot();
     const bus = new EventBus();
@@ -390,11 +520,98 @@ describe("Loopback API", () => {
     await app.close();
   });
 
-  it("exports an allowlisted recursively redacted report before finalizing the retained workspace", async () => {
+  it("returns a safe non-200 response and unsubscribes when persisted SSE replay fails", async () => {
+    const root = await temporaryRoot();
+    const bus = new EventBus();
+    const originalSubscribe = bus.subscribe.bind(bus);
+    const unsubscribe = vi.fn();
+    vi.spyOn(bus, "subscribe").mockImplementation((runId, listener) => {
+      const remove = originalSubscribe(runId, listener);
+      return () => {
+        unsubscribe();
+        remove();
+      };
+    });
+    const app = await createServer(dependencies({
+      eventBus: bus,
+      runStore: { async readEvents() { throw new Error("private replay failure"); } }
+    }), { sessionToken: "test-token", appData: root, webDist: undefined });
+
+    const response = await app.inject({
+      method: "GET", url: "/api/runs/run_01/events?token=test-token"
+    });
+    expect(response.statusCode).toBe(500);
+    expect(response.json()).toEqual({
+      error: { code: "INTERNAL_ERROR", message: "Request failed safely" }
+    });
+    expect(response.body).not.toContain("private replay failure");
+    expect(unsubscribe).toHaveBeenCalledTimes(1);
+    await app.close();
+  });
+
+  it("closes a terminal SSE replay even when Last-Event-ID skips the terminal event", async () => {
+    const root = await temporaryRoot();
+    const bus = new EventBus();
+    const app = await createServer(dependencies({
+      eventBus: bus,
+      runStore: { async readEvents() { return [event(0), event(1, "run.finished")]; } }
+    }), { sessionToken: "test-token", appData: root, webDist: undefined });
+
+    const pending = app.inject({
+      method: "GET",
+      url: "/api/runs/run_01/events?token=test-token",
+      headers: { "last-event-id": "1" }
+    });
+    const response = await Promise.race([
+      pending,
+      new Promise<undefined>((resolve) => setTimeout(() => resolve(undefined), 50))
+    ]);
+    expect(response, "known terminal replay must close immediately").toBeDefined();
+    if (response === undefined) {
+      bus.publishPersisted(event(2, "run.finished"));
+      await pending;
+      throw new Error("terminal replay remained open");
+    }
+    expect(response.statusCode).toBe(200);
+    expect(response.body).not.toMatch(/^id:/mu);
+    await app.close();
+  });
+
+  it("treats an unsafe Last-Event-ID as absent and replays from sequence zero", async () => {
+    const root = await temporaryRoot();
+    const bus = new EventBus();
+    const app = await createServer(dependencies({
+      eventBus: bus,
+      runStore: { async readEvents() { return [event(0, "run.finished")]; } }
+    }), { sessionToken: "test-token", appData: root, webDist: undefined });
+
+    const pending = app.inject({
+      method: "GET",
+      url: "/api/runs/run_01/events?token=test-token",
+      headers: { "last-event-id": "9007199254740992" }
+    });
+    const response = await Promise.race([
+      pending,
+      new Promise<undefined>((resolve) => setTimeout(() => resolve(undefined), 50))
+    ]);
+    expect(response, "unsafe event IDs must not suppress replay").toBeDefined();
+    if (response === undefined) {
+      bus.publishPersisted(event(1, "run.finished"));
+      await pending;
+      throw new Error("unsafe Last-Event-ID suppressed terminal replay");
+    }
+    expect(response.body).toMatch(/^id: 0$/mu);
+    await app.close();
+  });
+
+  it("delivers an allowlisted report without waiting for finish-triggered workspace cleanup", async () => {
     const root = await temporaryRoot();
     const order: string[] = [];
+    let releaseCleanup!: () => void;
+    const cleanupBlocked = new Promise<void>((resolve) => { releaseCleanup = resolve; });
     const finalizeWorkspace = vi.fn(async () => {
       order.push("finalize");
+      await cleanupBlocked;
       return { removed: true };
     });
     const app = await createServer(dependencies({
@@ -407,10 +624,20 @@ describe("Loopback API", () => {
       }
     }), { sessionToken: "test-token", appData: root, webDist: undefined });
 
-    const response = await app.inject({
+    const responsePromise = app.inject({
       method: "GET", url: "/api/runs/run_01/report",
       headers: { "x-arena-token": "test-token" }
     });
+    const response = await Promise.race([
+      responsePromise,
+      new Promise<undefined>((resolve) => setTimeout(() => resolve(undefined), 50))
+    ]);
+    expect(response, "response must finish before cleanup resolves").toBeDefined();
+    if (response === undefined) {
+      releaseCleanup();
+      await responsePromise;
+      throw new Error("report response waited for cleanup");
+    }
     expect(response.statusCode).toBe(200);
     expect(response.json()).toMatchObject({ schema: "arena.report/v1" });
     expect(response.body).not.toContain(secretSource);
@@ -419,7 +646,233 @@ describe("Loopback API", () => {
     expect(response.body).not.toContain("sk-test-secret");
     expect(response.body).not.toContain("test-token");
     expect(order).toEqual(["events", "finalize"]);
-    expect(finalizeWorkspace).toHaveBeenCalledWith("run_01", { report_exported: true });
+    releaseCleanup();
+    await vi.waitFor(() => {
+      expect(finalizeWorkspace).toHaveBeenCalledWith("run_01", { report_exported: true });
+    });
+    await app.close();
+  });
+
+  it("runs finish-triggered cleanup once for concurrent successful report exports and retries failures", async () => {
+    const root = await temporaryRoot();
+    const finalizeWorkspace = vi.fn()
+      .mockImplementationOnce(() => { throw new Error("cleanup failed"); })
+      .mockResolvedValue({ removed: true });
+    const app = await createServer(dependencies({
+      orchestrator: { ...dependencies().orchestrator, finalizeWorkspace }
+    }), { sessionToken: "test-token", appData: root, webDist: undefined });
+    const request = () => app.inject({
+      method: "GET", url: "/api/runs/run_01/report",
+      headers: { "x-arena-token": "test-token" }
+    });
+
+    const firstPair = await Promise.all([request(), request()]);
+    expect(firstPair.map(({ statusCode }) => statusCode)).toEqual([200, 200]);
+    await vi.waitFor(() => expect(finalizeWorkspace).toHaveBeenCalledTimes(1));
+    expect((await request()).statusCode).toBe(200);
+    await vi.waitFor(() => expect(finalizeWorkspace).toHaveBeenCalledTimes(2));
+    expect((await request()).statusCode).toBe(200);
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    expect(finalizeWorkspace).toHaveBeenCalledTimes(2);
+    await app.close();
+  });
+
+  it("projects report trace data away and sanitizes embedded paths and exact secrets", async () => {
+    const root = await temporaryRoot();
+    const unsafeVerdict: VerdictBundle = {
+      schema: "arena.verdict/v1",
+      run_id: "run_01",
+      status: "error",
+      hard_gate_failures: [],
+      dimensions: [],
+      verifier_results: [{
+        id: "native-error",
+        passed: false,
+        hard_gate: false,
+        message: "ENOENT: open '/Users/alice/private/source/SKILL.md'",
+        evidence: ["event:0"]
+      }],
+      evidence: ["event:0"],
+      error: {
+        code: "RUN_FAILED",
+        message: "git --work-tree=/Users/alice/private/source status"
+      }
+    };
+    const unsafeDiagnosis: Diagnosis = {
+      ...diagnosis(),
+      observed_failure: "file:///Users/alice/private/source/SKILL.md",
+      likely_skill_gap: "argv --work-tree=/Users/alice/private/source",
+      retry_analysis: "session is test-token"
+    };
+    const app = await createServer(dependencies({
+      async loadVerdict() { return unsafeVerdict; },
+      async loadDiagnosis() { return unsafeDiagnosis; }
+    }), { sessionToken: "test-token", appData: root, webDist: undefined });
+
+    const response = await app.inject({
+      method: "GET", url: "/api/runs/run_01/report",
+      headers: { "x-arena-token": "test-token" }
+    });
+    expect(response.statusCode).toBe(200);
+    const report = response.json() as { trace: Array<Record<string, unknown>> };
+    expect(report.trace.every((item) => !("data" in item))).toBe(true);
+    expect(response.body).not.toContain("/Users/alice");
+    expect(response.body).not.toContain("file://");
+    expect(response.body).not.toContain("test-token");
+    await app.close();
+  });
+
+  it("rejects report lineage or membership mismatches without cleanup", async () => {
+    const cases: Array<[string, (base: ServerDependencies) => Partial<ServerDependencies>]> = [
+      ["context run", (base) => ({
+        orchestrator: {
+          ...base.orchestrator,
+          getRunContext: () => ({
+            ...base.orchestrator.getRunContext("run_01"),
+            envelope: { ...envelope(), run_id: "run_other" }
+          })
+        }
+      })],
+      ["snapshot fingerprint", (base) => ({
+        orchestrator: {
+          ...base.orchestrator,
+          getRunContext: () => ({
+            ...base.orchestrator.getRunContext("run_01"),
+            snapshot_execution_fingerprint: "f".repeat(64)
+          })
+        }
+      })],
+      ["verdict run", () => ({ async loadVerdict() { return { ...verdict(), run_id: "run_other" }; } })],
+      ["diagnosis run", () => ({ async loadDiagnosis() { return { ...diagnosis(), run_id: "run_other" }; } })],
+      ["trace run", () => ({
+        runStore: { async readEvents() { return [{ ...event(0), run_id: "run_other" }]; } }
+      })],
+      ["trace sequence", () => ({
+        runStore: { async readEvents() { return [event(0), event(2, "run.finished")]; } }
+      })],
+      ["repair run", () => ({
+        async loadRepair() { return { schema: "arena.repair/v1", run_id: "run_other" }; }
+      })]
+    ];
+    for (const [label, override] of cases) {
+      const root = await temporaryRoot();
+      const finalizeWorkspace = vi.fn();
+      const base = dependencies();
+      const app = await createServer(dependencies({
+        ...override(base),
+        orchestrator: {
+          ...(override(base).orchestrator ?? base.orchestrator),
+          finalizeWorkspace
+        }
+      }), { sessionToken: "test-token", appData: root, webDist: undefined });
+      const response = await app.inject({
+        method: "GET", url: "/api/runs/run_01/report",
+        headers: { "x-arena-token": "test-token" }
+      });
+      expect(response.statusCode, label).toBe(500);
+      expect(response.json(), label).toEqual({
+        error: { code: "INTERNAL_ERROR", message: "Request failed safely" }
+      });
+      expect(finalizeWorkspace, label).not.toHaveBeenCalled();
+      await app.close();
+    }
+  });
+
+  it("does not clean up when a report client disconnects before delivery finishes", async () => {
+    const root = await temporaryRoot();
+    let reportStarted!: () => void;
+    const started = new Promise<void>((resolve) => { reportStarted = resolve; });
+    let releaseVerdict!: (value: VerdictBundle) => void;
+    const blockedVerdict = new Promise<VerdictBundle>((resolve) => { releaseVerdict = resolve; });
+    const finalizeWorkspace = vi.fn();
+    const app = await createServer(dependencies({
+      orchestrator: { ...dependencies().orchestrator, finalizeWorkspace },
+      async loadVerdict() {
+        reportStarted();
+        return blockedVerdict;
+      }
+    }), { sessionToken: "test-token", appData: root, webDist: undefined });
+    let disconnect!: () => void;
+    app.addHook("onRequest", (_request, reply, done) => {
+      disconnect = () => reply.raw.destroy();
+      done();
+    });
+    const pending = app.inject({
+      method: "GET",
+      url: "/api/runs/run_01/report",
+      headers: { "x-arena-token": "test-token" }
+    });
+    await started;
+    disconnect();
+    releaseVerdict(verdict());
+    await pending.catch(() => undefined);
+    await new Promise((resolve) => setTimeout(resolve, 30));
+    expect(finalizeWorkspace).not.toHaveBeenCalled();
+    await app.close();
+  });
+
+  it("does not clean up when successful report serialization fails during response sending", async () => {
+    const root = await temporaryRoot();
+    const finalizeWorkspace = vi.fn();
+    const app = await createServer(dependencies({
+      orchestrator: { ...dependencies().orchestrator, finalizeWorkspace }
+    }), { sessionToken: "test-token", appData: root, webDist: undefined });
+    app.addHook("onSend", async (request, reply, payload) => {
+      if (request.url === "/api/runs/run_01/report" && reply.statusCode === 200) {
+        throw new Error("simulated response serialization failure");
+      }
+      return payload;
+    });
+
+    const response = await app.inject({
+      method: "GET", url: "/api/runs/run_01/report",
+      headers: { "x-arena-token": "test-token" }
+    });
+    expect(response.statusCode).toBe(500);
+    expect(response.body).not.toContain("simulated response serialization failure");
+    expect(finalizeWorkspace).not.toHaveBeenCalled();
+    await app.close();
+  });
+
+  it("marks SSE closed and unsubscribes when the client disconnects during replay loading", async () => {
+    const root = await temporaryRoot();
+    const bus = new EventBus();
+    const originalSubscribe = bus.subscribe.bind(bus);
+    const unsubscribe = vi.fn();
+    vi.spyOn(bus, "subscribe").mockImplementation((runId, listener) => {
+      const remove = originalSubscribe(runId, listener);
+      return () => {
+        unsubscribe();
+        remove();
+      };
+    });
+    let replayStarted!: () => void;
+    const started = new Promise<void>((resolve) => { replayStarted = resolve; });
+    let releaseReplay!: (value: TraceEvent[]) => void;
+    const blockedReplay = new Promise<TraceEvent[]>((resolve) => { releaseReplay = resolve; });
+    const app = await createServer(dependencies({
+      eventBus: bus,
+      runStore: {
+        async readEvents() {
+          replayStarted();
+          return blockedReplay;
+        }
+      }
+    }), { sessionToken: "test-token", appData: root, webDist: undefined });
+    let disconnect!: () => void;
+    app.addHook("onRequest", (_request, reply, done) => {
+      disconnect = () => reply.raw.destroy();
+      done();
+    });
+    const pending = app.inject({
+      method: "GET",
+      url: "/api/runs/run_01/events?token=test-token"
+    });
+    await started;
+    disconnect();
+    releaseReplay([event(0)]);
+    await pending.catch(() => undefined);
+    await vi.waitFor(() => expect(unsubscribe).toHaveBeenCalledTimes(1));
     await app.close();
   });
 
@@ -446,6 +899,90 @@ describe("Loopback API", () => {
 });
 
 describe("startCli", () => {
+  it("records a safe failed repair after approval rejects", async () => {
+    const proposal = {
+      repair_id: "repair_01",
+      run_id: "run_01",
+      status: "pending" as const,
+      snapshot_hash: hashB,
+      created_at: "2026-07-15T00:02:00.000Z",
+      changed_paths: ["SKILL.md"],
+      patch_ref: `sha256:${"d".repeat(64)}` as const
+    };
+    const registry = createProcessRepairRegistry({
+      async createRepairFork() { return proposal; },
+      async approveAndRerun() {
+        throw new Error("ENOENT: '/Users/alice/private/repair'");
+      }
+    });
+
+    await registry.repairs.createRepairFork("run_01");
+    await expect(registry.repairs.approveAndRerun("repair_01")).rejects.toThrow();
+    expect(await registry.loadRepair("run_01")).toEqual({
+      ...proposal,
+      status: "failed",
+      error: { code: "REPAIR_APPROVAL_FAILED" }
+    });
+    expect(JSON.stringify(await registry.loadRepair("run_01"))).not.toContain("/Users");
+  });
+
+  it("resolves manifests and production web assets from the installation root after chdir", async () => {
+    const projectRoot = process.cwd();
+    const webDist = path.join(projectRoot, "dist", "web");
+    const appData = await temporaryRoot();
+    await mkdir(webDist, { recursive: true });
+    let observedWebDist: string | undefined;
+    const previous = process.cwd();
+    process.chdir(tmpdir());
+    try {
+      const deps = await createDefaultServerDependencies(appData);
+      expect((await deps.listManifests()).map(({ id }) => id)).toHaveLength(3);
+      await startCli(["--app-data", appData, "--no-open"], {
+        async createDependencies() { return dependencies(); },
+        async createServer(_dependencies, options) {
+          observedWebDist = options.webDist;
+          return { async listen() { return undefined; } };
+        },
+        randomBytes() { return Buffer.alloc(32, 0xcd); },
+        async openBrowser() { throw new Error("must not open"); },
+        writeLine() {}
+      });
+    } finally {
+      process.chdir(previous);
+      await rm(webDist, { recursive: true, force: true });
+    }
+    expect(observedWebDist).toBe(webDist);
+  });
+
+  it("creates and tightens every app-data directory while rejecting symlinked children", async () => {
+    const root = await temporaryRoot();
+    await chmod(root, 0o755);
+    const deps = await createDefaultServerDependencies(root);
+    expect(deps).toBeDefined();
+    for (const name of [
+      "",
+      "imports",
+      "runs",
+      "artifacts",
+      "workspaces",
+      "runner-output",
+      "repairs",
+      "uploads"
+    ]) {
+      const stats = await lstat(path.join(root, name));
+      expect(stats.isDirectory(), name).toBe(true);
+      expect(stats.isSymbolicLink(), name).toBe(false);
+      expect(stats.mode & 0o777, name).toBe(0o700);
+      if (typeof process.getuid === "function") expect(stats.uid, name).toBe(process.getuid());
+    }
+
+    const badRoot = await temporaryRoot();
+    const outside = await temporaryRoot();
+    await symlink(outside, path.join(badRoot, "imports"));
+    await expect(createDefaultServerDependencies(badRoot)).rejects.toThrow();
+    expect(await readdir(outside)).toEqual([]);
+  });
+
   it("assembles the real process-local server dependencies without invoking Codex", async () => {
     const root = await temporaryRoot();
     const deps = await createDefaultServerDependencies(root);
