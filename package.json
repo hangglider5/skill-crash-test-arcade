@@ -1,0 +1,48 @@
+{
+  "name": "skill-crash-test-arcade",
+  "private": true,
+  "type": "module",
+  "packageManager": "pnpm@10.28.2",
+  "engines": {
+    "node": ">=22.6.0"
+  },
+  "scripts": {
+    "dev": "concurrently -k -n core,web \"pnpm dev:core\" \"pnpm dev:web\"",
+    "dev:core": "tsx watch src/core/cli.ts --dev-token dev-token",
+    "dev:web": "vite",
+    "build": "vite build && tsup src/core/cli.ts --format esm --out-dir dist/core --bundle",
+    "start": "node dist/core/cli.js",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "typecheck": "tsc --noEmit",
+    "check": "pnpm typecheck && pnpm test && pnpm build"
+  },
+  "dependencies": {
+    "@fastify/multipart": "^10.1.0",
+    "@fastify/static": "^10.1.0",
+    "fastify": "^5.10.0",
+    "fflate": "^0.8.3",
+    "open": "^11.0.0",
+    "react": "^19.2.7",
+    "react-dom": "^19.2.7",
+    "zod": "^4.4.3"
+  },
+  "devDependencies": {
+    "@playwright/test": "^1.61.1",
+    "@testing-library/jest-dom": "^6.9.1",
+    "@testing-library/react": "^16.3.2",
+    "@testing-library/user-event": "^14.6.1",
+    "@types/node": "^26.1.1",
+    "@types/react": "^19.2.17",
+    "@types/react-dom": "^19.2.3",
+    "@vitejs/plugin-react": "^6.0.3",
+    "@vitest/coverage-v8": "^4.1.10",
+    "concurrently": "^10.0.3",
+    "jsdom": "^29.1.1",
+    "tsup": "^8.5.1",
+    "tsx": "^4.23.1",
+    "typescript": "^5.9.3",
+    "vite": "^8.1.4",
+    "vitest": "^4.1.10"
+  }
+}
