@@ -1,6 +1,6 @@
 # Skill Crash-Test Arcade — Design Specification
 
-- Status: Approved in collaborative design; pending final document review
+- Status: Approved for implementation
 - Date: 2026-07-14
 - Owner: Solo Build Week participant
 - Target track: Developer Tools
