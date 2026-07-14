@@ -411,6 +411,25 @@ describe("bounded ZIP Skill import", () => {
       .rejects.toMatchObject({ code: "ZIP_TOO_LARGE" });
   });
 
+  it("counts zero-size directory entries toward the 200-entry ZIP limit", async () => {
+    const root = await temporaryRoot("scta-zip-entry-limit-");
+    const atLimit: Zippable = { "SKILL.md": strToU8("# Skill\n") };
+    for (let index = 0; index < 199; index += 1) {
+      atLimit[`directories/${index}/`] = [strToU8(""), { level: 0 }];
+    }
+    const accepted = await writeZip(root, atLimit, "200-entries.zip");
+    await expect(importSkill({ kind: "zip", path: accepted }, path.join(root, "accepted")))
+      .resolves.toMatchObject({ files: [{ path: "SKILL.md" }] });
+
+    const overLimit: Zippable = {
+      ...atLimit,
+      "directories/199/": [strToU8(""), { level: 0 }]
+    };
+    const rejected = await writeZip(root, overLimit, "201-entries.zip");
+    await expect(importSkill({ kind: "zip", path: rejected }, path.join(root, "rejected")))
+      .rejects.toMatchObject({ code: "ZIP_TOO_MANY_FILES", details: { limit: 200 } });
+  });
+
   it("rejects case-folded and Unicode-normalized ZIP path conflicts", async () => {
     const root = await temporaryRoot("scta-zip-portable-conflict-");
     const caseConflict = await writeZip(root, {

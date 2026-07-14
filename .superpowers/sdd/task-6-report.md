@@ -59,3 +59,22 @@ Portable Node does not expose `openat(2)` or a cross-platform directory `RENAME_
 
 - `pnpm typecheck && pnpm test && git diff --check` passed with 141/141 tests.
 - The unchanged sample's successful Task 6 `quick_validate.py` result remains recorded above. This rerun could not initialize the sandboxed uv cache, and the bundled Python fallback lacked PyYAML; no broader escalation or dependency change was made.
+
+## Final resource-boundary fix (2026-07-14)
+
+### TDD evidence
+
+- RED: `pnpm exec vitest run test/core/importer.test.ts test/core/importer-source-race.test.ts` failed 2/37 cases. A ZIP containing 201 total central entries (one `SKILL.md` and 200 valid stored zero-size directories) was accepted, and a local file grown after traversal `lstat` was read and published at 5 MiB + 1 byte aggregate.
+- The deterministic race test wraps `node:fs/promises.lstat` only in the test module: it captures the real `c.bin` metadata, appends two bytes, then returns the stale stat. No production test seam was added.
+- GREEN: the same focused command passed 37/37 cases.
+
+### Fixes
+
+- ZIP preflight now caps the EOCD central-entry count at 200 before `unzipSync`; the accepted boundary is one file plus 199 directory entries, while one file plus 200 directories is rejected. Existing zero-size/CRC directory validation and aggregate uncompressed-byte accounting remain intact.
+- The shared local/Git tree collector opens with `O_NOFOLLOW`, requires opened inode/type/size to match traversal metadata, enforces per-file and actual opened-size aggregate caps before allocation, performs bounded descriptor reads into an exact-size buffer, probes exact EOF, and rechecks stable descriptor metadata before accepting bytes.
+
+### Validation
+
+- Final gate: `pnpm typecheck && pnpm test && git diff --check`.
+- The sample fixture is unchanged, so its prior successful validation remains applicable.
+- Residual assumption remains unchanged: same-user mutation after the final descriptor check is outside the captured snapshot contents.

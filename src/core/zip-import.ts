@@ -1,6 +1,6 @@
 import { unzipSync } from "fflate";
 
-const MAX_ZIP_FILES = 200;
+const MAX_ZIP_ENTRIES = 200;
 const MAX_ZIP_BYTES = 5 * 1024 * 1024;
 const UTF8_FLAG = 0x0800;
 
@@ -244,11 +244,13 @@ function preflightZip(data: Buffer): ZipEntry[] {
   }
   const eocd = findEndOfCentralDirectory(data);
   const { entryCount, centralOffset } = validateEocd(data, eocd);
+  if (entryCount > MAX_ZIP_ENTRIES) {
+    failure("ZIP_TOO_MANY_FILES", { limit: MAX_ZIP_ENTRIES });
+  }
   const entries: ZipEntry[] = [];
   const files = new Map<string, string>();
   const directories = new Map<string, string>();
   let totalBytes = 0;
-  let fileCount = 0;
   let cursor = centralOffset;
   for (let index = 0; index < entryCount; index += 1) {
     const parsed = parseCentralEntry(data, cursor, eocd);
@@ -256,9 +258,6 @@ function preflightZip(data: Buffer): ZipEntry[] {
     totalBytes += entry.uncompressedBytes;
     if (totalBytes > MAX_ZIP_BYTES) {
       failure("ZIP_TOO_LARGE", { limit_bytes: MAX_ZIP_BYTES });
-    }
-    if (!entry.directory && ++fileCount > MAX_ZIP_FILES) {
-      failure("ZIP_TOO_MANY_FILES", { limit: MAX_ZIP_FILES });
     }
     validatePortablePath(entry.path, entry.directory, files, directories);
     entries.push(entry);

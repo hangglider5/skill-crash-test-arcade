@@ -245,7 +245,8 @@ async function assertNoSymlinkDescendants(directory: string): Promise<void> {
 async function securelyReadFile(
   filePath: string,
   safePath: string,
-  expected: Awaited<ReturnType<typeof lstat>>
+  expected: Awaited<ReturnType<typeof lstat>>,
+  acceptedBytes: number
 ): Promise<Buffer> {
   if (expected.size > MAX_FILE_BYTES) {
     failure("FILE_TOO_LARGE", { path: safePath, limit_bytes: MAX_FILE_BYTES });
@@ -254,15 +255,46 @@ async function securelyReadFile(
   try {
     handle = await open(filePath, constants.O_RDONLY | constants.O_NOFOLLOW);
     const opened = await handle.stat();
-    if (!opened.isFile() || opened.dev !== expected.dev || opened.ino !== expected.ino) {
+    if (
+      !opened.isFile()
+      || opened.dev !== expected.dev
+      || opened.ino !== expected.ino
+      || opened.size !== expected.size
+    ) {
       failure("SOURCE_UNAVAILABLE", { path: safePath });
     }
     if (opened.size > MAX_FILE_BYTES) {
       failure("FILE_TOO_LARGE", { path: safePath, limit_bytes: MAX_FILE_BYTES });
     }
-    const data = await handle.readFile();
+    if (acceptedBytes + opened.size > MAX_IMPORT_BYTES) {
+      failure("IMPORT_TOO_LARGE", { limit_bytes: MAX_IMPORT_BYTES });
+    }
+    const data = Buffer.alloc(opened.size);
+    let offset = 0;
+    while (offset < data.byteLength) {
+      const { bytesRead } = await handle.read(data, offset, data.byteLength - offset, offset);
+      if (bytesRead === 0) {
+        failure("SOURCE_UNAVAILABLE", { path: safePath });
+      }
+      offset += bytesRead;
+    }
+    const eofProbe = Buffer.alloc(1);
+    if ((await handle.read(eofProbe, 0, 1, opened.size)).bytesRead !== 0) {
+      failure("SOURCE_UNAVAILABLE", { path: safePath });
+    }
     const after = await handle.stat();
-    if (after.size !== opened.size || after.mtimeMs !== opened.mtimeMs || data.byteLength !== opened.size) {
+    if (
+      !after.isFile()
+      || after.dev !== opened.dev
+      || after.ino !== opened.ino
+      || after.mode !== opened.mode
+      || after.nlink !== opened.nlink
+      || after.uid !== opened.uid
+      || after.gid !== opened.gid
+      || after.size !== opened.size
+      || after.mtimeMs !== opened.mtimeMs
+      || after.ctimeMs !== opened.ctimeMs
+    ) {
       failure("SOURCE_UNAVAILABLE", { path: safePath });
     }
     return data;
@@ -325,13 +357,11 @@ async function collectLocalFiles(root: string): Promise<AcceptedFile[]> {
         if (files.length >= MAX_IMPORT_FILES) {
           failure("TOO_MANY_FILES", { limit: MAX_IMPORT_FILES });
         }
-        if (totalBytes + entryStats.size > MAX_IMPORT_BYTES) {
-          failure("IMPORT_TOO_LARGE", { limit_bytes: MAX_IMPORT_BYTES });
-        }
-        totalBytes += entryStats.size;
+        const data = await securelyReadFile(absolutePath, safePath, entryStats, totalBytes);
+        totalBytes += data.byteLength;
         files.push({
           path: safePath,
-          data: await securelyReadFile(absolutePath, safePath, entryStats)
+          data
         });
       } else {
         failure("NON_REGULAR_FILE", { path: safePath });
