@@ -317,6 +317,36 @@ describe("ImportLobby", () => {
     expect(screen.getByRole("button", { name: "Start Crash Test" })).toBeDisabled();
   });
 
+  it("renders health while manifests remain pending", async () => {
+    const pendingManifests = deferred<ReplayManifest[]>();
+    const api = fakeApi();
+    vi.mocked(api.listManifests).mockReturnValueOnce(pendingManifests.promise);
+    render(<ImportLobby api={api} onRunStarted={vi.fn()} />);
+    const arenaPanel = screen.getByRole("region", { name: "Arena Match" });
+    const preflightPanel = screen.getByRole("region", { name: "Runner Preflight" });
+
+    expect(await within(preflightPanel).findByText("Codex CLI available")).toBeVisible();
+    expect(within(preflightPanel).queryByText(/Checking/)).not.toBeInTheDocument();
+    expect(within(arenaPanel).getByText(/Loading/)).toBeVisible();
+
+    await act(async () => pendingManifests.resolve([dirtyTreeSummary()]));
+  });
+
+  it("renders manifests while health remains pending", async () => {
+    const pendingHealth = deferred<PreflightResult>();
+    const api = fakeApi();
+    vi.mocked(api.health).mockReturnValueOnce(pendingHealth.promise);
+    render(<ImportLobby api={api} onRunStarted={vi.fn()} />);
+    const arenaPanel = screen.getByRole("region", { name: "Arena Match" });
+    const preflightPanel = screen.getByRole("region", { name: "Runner Preflight" });
+
+    expect(await within(arenaPanel).findByText("Dirty Tree")).toBeVisible();
+    expect(within(arenaPanel).queryByText(/Loading/)).not.toBeInTheDocument();
+    expect(within(preflightPanel).getByText(/Checking/)).toBeVisible();
+
+    await act(async () => pendingHealth.resolve(readyHealth()));
+  });
+
   it("drops a stale inspection when the source changes", async () => {
     let resolveFirst: ((snapshot: SkillSnapshot) => void) | undefined;
     const firstImport = new Promise<SkillSnapshot>((resolve) => {
@@ -490,6 +520,17 @@ describe("ImportLobby", () => {
     expect(sample).toHaveAttribute("aria-selected", "true");
   });
 
+  it("does not expose broken aria-controls relationships from source tabs", () => {
+    render(<ImportLobby api={fakeApi()} onRunStarted={vi.fn()} />);
+
+    for (const tab of screen.getAllByRole("tab")) {
+      const controlledId = tab.getAttribute("aria-controls");
+      if (controlledId !== null) {
+        expect(document.getElementById(controlledId)).not.toBeNull();
+      }
+    }
+  });
+
   it("disables every mutable configuration control while a run is starting", async () => {
     const pendingRun = deferred<RunEnvelope>();
     const api = fakeApi();
@@ -526,6 +567,26 @@ describe("ImportLobby", () => {
     await act(async () => pendingRun.resolve(createdRun()));
 
     expect(onRunStarted).toHaveBeenCalledWith("run_01");
+  });
+
+  it("does not report a created run from a superseded API while still mounted", async () => {
+    const pendingRun = deferred<RunEnvelope>();
+    const oldApi = fakeApi();
+    vi.mocked(oldApi.startRun).mockReturnValueOnce(pendingRun.promise);
+    const newApi = fakeApi({ manifests: [falseGreenSummary()] });
+    const onRunStarted = vi.fn<(runId: string) => void>();
+    const user = userEvent.setup();
+    const { rerender } = render(
+      <ImportLobby api={oldApi} onRunStarted={onRunStarted} />
+    );
+    await inspectGit(user);
+    await user.click(screen.getByRole("button", { name: "Start Crash Test" }));
+
+    rerender(<ImportLobby api={newApi} onRunStarted={onRunStarted} />);
+    expect(await screen.findByText("False Green")).toBeVisible();
+    await act(async () => pendingRun.resolve(createdRun()));
+
+    expect(onRunStarted).not.toHaveBeenCalled();
   });
 
   it("renders independent safe preflight and manifest failure states in their panels", async () => {

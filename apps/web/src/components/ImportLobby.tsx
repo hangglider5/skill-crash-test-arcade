@@ -242,22 +242,30 @@ export function ImportLobby({ api, onRunStarted }: ImportLobbyProps): React.JSX.
     setManifestError(null);
     const loadHealth = api.health();
     const loadManifests = api.listManifests();
-    void Promise.allSettled([loadHealth, loadManifests]).then(([healthResult, manifestResult]) => {
-      if (cancelled
-        || !mountedRef.current
-        || stateGenerationRef.current !== generation
-        || prefetchSequenceRef.current !== prefetchSequence) return;
-      if (healthResult.status === "fulfilled") {
-        setHealth(healthResult.value);
-      } else {
-        setPreflightError("Unable to verify local runner safely.");
+    const isCurrentPrefetch = (): boolean => !cancelled
+      && mountedRef.current
+      && stateGenerationRef.current === generation
+      && prefetchSequenceRef.current === prefetchSequence;
+    void loadHealth.then(
+      (result) => {
+        if (isCurrentPrefetch()) setHealth(result);
+      },
+      () => {
+        if (isCurrentPrefetch()) {
+          setPreflightError("Unable to verify local runner safely.");
+        }
       }
-      if (manifestResult.status === "fulfilled") {
-        setManifests(manifestResult.value);
-      } else {
-        setManifestError("Unable to load Replay-safe manifests safely.");
+    );
+    void loadManifests.then(
+      (result) => {
+        if (isCurrentPrefetch()) setManifests(result);
+      },
+      () => {
+        if (isCurrentPrefetch()) {
+          setManifestError("Unable to load Replay-safe manifests safely.");
+        }
       }
-    });
+    );
     return () => {
       cancelled = true;
     };
@@ -402,7 +410,10 @@ export function ImportLobby({ api, onRunStarted }: ImportLobbyProps): React.JSX.
         setBusy(null);
       }
     }
-    if (createdRunId !== null) onRunStarted(createdRunId);
+    if (createdRunId !== null
+      && (!mountedRef.current || stateGenerationRef.current === generation)) {
+      onRunStarted(createdRunId);
+    }
   }
 
   return (
@@ -421,7 +432,6 @@ export function ImportLobby({ api, onRunStarted }: ImportLobbyProps): React.JSX.
             <div className="source-tabs" role="tablist" aria-label="Skill source">
               {SOURCE_TABS.map((tab, index) => (
                 <button
-                  aria-controls={`source-panel-${tab.id}`}
                   aria-selected={sourceTab === tab.id}
                   disabled={busy === "start"}
                   id={`source-tab-${tab.id}`}
