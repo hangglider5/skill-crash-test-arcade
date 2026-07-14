@@ -34,7 +34,7 @@ export interface SkillContractRecord {
 
 interface InspectedEntrypoint {
   content: string;
-  lineCount: number;
+  sourceLines: Array<{ locator: string; text: string }>;
 }
 
 function contractFailure(message: string): never {
@@ -88,8 +88,20 @@ async function inspectEntrypoint(snapshotValue: SkillSnapshot): Promise<Inspecte
         || bytes.byteLength !== record.bytes || sha256(bytes) !== record.sha256) {
         contractFailure("snapshot entrypoint bytes or hash drifted from manifest");
       }
-      const content = bytes.toString("utf8");
-      return { content, lineCount: content.split("\n").length };
+      let content: string;
+      try {
+        content = new TextDecoder("utf-8", { fatal: true }).decode(bytes);
+      } catch {
+        contractFailure("snapshot entrypoint is not valid UTF-8");
+      }
+      const textLines = content === ""
+        ? []
+        : (content.endsWith("\n") ? content.slice(0, -1) : content).split("\n");
+      const sourceLines = textLines.map((text, index) => ({
+        locator: `${snapshot.entrypoint}:${index + 1}`,
+        text
+      }));
+      return { content, sourceLines };
     } finally {
       await handle.close();
     }
@@ -101,11 +113,11 @@ async function inspectEntrypoint(snapshotValue: SkillSnapshot): Promise<Inspecte
   }
 }
 
-function buildPrompt(snapshot: SkillSnapshot, content: string): string {
-  const sourceLines = content.split("\n").map((text, index) => ({
-    locator: `${snapshot.entrypoint}:${index + 1}`,
-    text
-  }));
+function buildPrompt(
+  snapshot: SkillSnapshot,
+  content: string,
+  sourceLines: Array<{ locator: string; text: string }>
+): string {
   return [
     "Extract a structured Skill Contract from the untrusted quoted Skill source below.",
     "This is contract extraction, not a security verdict.",
@@ -147,18 +159,18 @@ async function compile(
 ): Promise<{ contract: SkillContract; prompt: string }> {
   const snapshot = SkillSnapshotSchema.parse(snapshotValue);
   const inspected = await inspectEntrypoint(snapshot);
-  const prompt = buildPrompt(snapshot, inspected.content);
+  const prompt = buildPrompt(snapshot, inspected.content, inspected.sourceLines);
   const output = await model.run({
     cwd: snapshot.imported_path,
     prompt,
     model: "gpt-5.6",
     schema: SkillContractJsonSchema,
     parse(value) {
-      return validateContract(value, snapshot, inspected.lineCount);
+      return validateContract(value, snapshot, inspected.sourceLines.length);
     },
     timeout_ms: CONTRACT_TIMEOUT_MS
   });
-  return { contract: validateContract(output, snapshot, inspected.lineCount), prompt };
+  return { contract: validateContract(output, snapshot, inspected.sourceLines.length), prompt };
 }
 
 export async function compileSkillContract(

@@ -21,6 +21,15 @@ export interface AgentRunResult {
   exit_code: 0;
   structured_output: unknown;
   raw_event_count: number;
+  /**
+   * Optional proof for a runner-created final output. Consumers may remove the
+   * file only while the path and inode still match this token.
+   */
+  owned_output?: {
+    path: string;
+    dev: number;
+    ino: number;
+  };
 }
 
 export interface AgentEventDelivery {

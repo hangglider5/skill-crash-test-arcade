@@ -2,7 +2,7 @@ import { spawn } from "node:child_process";
 
 import type { ArtifactRef } from "../protocol/index.js";
 
-import { readOwnedOutputFile, validateOwnedOutputPath } from "./output-file.js";
+import { readOwnedOutputFileWithIdentity, validateOwnedOutputPath } from "./output-file.js";
 import type {
   AgentEventDelivery,
   AgentEventHandler,
@@ -467,8 +467,11 @@ export class CodexProcessRunner implements AgentRunner {
           }
 
           let output: Buffer;
+          let outputIdentity: { path: string; dev: number; ino: number };
           try {
-            output = await readOwnedOutputFile(ownedOutput, this.#maxOutputBytes);
+            const ownedRead = await readOwnedOutputFileWithIdentity(ownedOutput, this.#maxOutputBytes);
+            output = ownedRead.data;
+            outputIdentity = ownedRead.identity;
           } catch {
             throw new RunnerError("RUNNER_OUTPUT_INVALID", "Codex did not produce a valid owned output file");
           }
@@ -480,7 +483,12 @@ export class CodexProcessRunner implements AgentRunner {
             const artifact = await this.#evidence(output, "application/json");
             throw artifact ? new RunnerError(error.code, error.message, artifact) : error;
           }
-          settleResolve({ exit_code: 0, structured_output: structured, raw_event_count: rawEventCount });
+          settleResolve({
+            exit_code: 0,
+            structured_output: structured,
+            raw_event_count: rawEventCount,
+            owned_output: outputIdentity
+          });
         })().catch((error: unknown) => {
           settleReject(error instanceof RunnerError
             ? error

@@ -1,4 +1,4 @@
-import { mkdtemp, readFile, realpath, rm, symlink, writeFile } from "node:fs/promises";
+import { lstat, mkdtemp, readFile, realpath, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -69,6 +69,12 @@ describe("CodexProcessRunner", () => {
       const structured = result.structured_output as { argv: string[]; env: Record<string, string> };
       expect(result.exit_code).toBe(0);
       expect(events).toHaveLength(5);
+      const outputStats = await lstat(input.output_path);
+      expect(result.owned_output).toEqual({
+        path: input.output_path,
+        dev: outputStats.dev,
+        ino: outputStats.ino
+      });
       expect(structured.argv).toEqual([
         "exec", "--json", "--ephemeral", "--ignore-user-config", "--ignore-rules",
         "-c", "shell_environment_policy.inherit=none",

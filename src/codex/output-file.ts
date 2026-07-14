@@ -14,6 +14,15 @@ export interface OwnedOutputPath {
   readonly file: string;
 }
 
+export interface OwnedOutputRead {
+  readonly data: Buffer;
+  readonly identity: {
+    readonly path: string;
+    readonly dev: number;
+    readonly ino: number;
+  };
+}
+
 function invalid(): never {
   throw new OutputFileError();
 }
@@ -50,10 +59,10 @@ export async function validateOwnedOutputPath(
   return { root, file };
 }
 
-export async function readOwnedOutputFile(
+export async function readOwnedOutputFileWithIdentity(
   owned: OwnedOutputPath,
   maxBytes: number
-): Promise<Buffer> {
+): Promise<OwnedOutputRead> {
   try {
     await assertCanonicalDirectory(owned.root);
     if (path.dirname(owned.file) !== owned.root) invalid();
@@ -82,7 +91,10 @@ export async function readOwnedOutputFile(
 
       const after = await handle.stat();
       if (after.nlink !== 1 || after.dev !== opened.dev || after.ino !== opened.ino || after.size !== opened.size) invalid();
-      return data;
+      return {
+        data,
+        identity: { path: owned.file, dev: opened.dev, ino: opened.ino }
+      };
     } finally {
       await handle.close();
     }
@@ -90,4 +102,11 @@ export async function readOwnedOutputFile(
     if (error instanceof OutputFileError) throw error;
     throw new OutputFileError();
   }
+}
+
+export async function readOwnedOutputFile(
+  owned: OwnedOutputPath,
+  maxBytes: number
+): Promise<Buffer> {
+  return (await readOwnedOutputFileWithIdentity(owned, maxBytes)).data;
 }

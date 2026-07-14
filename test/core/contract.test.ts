@@ -1,4 +1,5 @@
-import { lstat, mkdtemp, readFile, readdir, realpath, rm, symlink, writeFile } from "node:fs/promises";
+import { chmod, lstat, mkdtemp, readFile, readdir, realpath, rm, symlink, writeFile } from "node:fs/promises";
+import { writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 
@@ -18,17 +19,17 @@ import type { AgentRunInput, AgentRunner } from "../../src/codex/types.js";
 
 const roots: string[] = [];
 
-async function validSnapshot(): Promise<SkillSnapshot> {
+async function validSnapshot(source: string | Uint8Array = "# Skill\n\nRun focused verification.\n"): Promise<SkillSnapshot> {
   const importedPath = await realpath(await mkdtemp(path.join(tmpdir(), "scta-contract-")));
   roots.push(importedPath);
-  const content = "# Skill\n\nRun focused verification.\n";
+  const content = Buffer.from(source);
   await writeFile(path.join(importedPath, "SKILL.md"), content);
   return {
     schema: "arena.skill-snapshot/v1",
     source: { kind: "local", uri: importedPath },
     entrypoint: "SKILL.md",
     license: "Unknown",
-    files: [{ path: "SKILL.md", bytes: Buffer.byteLength(content), sha256: sha256(content) }],
+    files: [{ path: "SKILL.md", bytes: content.byteLength, sha256: sha256(content) }],
     source_hash: "b".repeat(64),
     imported_path: importedPath
   };
@@ -120,6 +121,41 @@ describe("Skill Contract Compiler", () => {
     expect(linkModel.requests).toHaveLength(0);
   });
 
+  it("uses real source lines for trailing, non-trailing, and empty files", async () => {
+    const trailing = await validSnapshot("one\ntwo\n");
+    const trailingModel = new CapturingModel({
+      ...validContract(),
+      promises: [{ statement: "Two", evidence: "SKILL.md:2", confidence: 1 }]
+    });
+    await compileSkillContract(trailing, trailingModel);
+    expect(trailingModel.requests[0]!.prompt).toContain(
+      'SOURCE_LINES_JSON=[{"locator":"SKILL.md:1","text":"one"},{"locator":"SKILL.md:2","text":"two"}]'
+    );
+    expect(trailingModel.requests[0]!.prompt).not.toContain("SKILL.md:3");
+
+    const nonTrailing = await validSnapshot("one\ntwo");
+    await expect(compileSkillContract(nonTrailing, new CapturingModel({
+      ...validContract(),
+      promises: [{ statement: "Two", evidence: "SKILL.md:2", confidence: 1 }]
+    }))).resolves.toMatchObject({ snapshot_hash: nonTrailing.source_hash });
+
+    const empty = await validSnapshot("");
+    const emptyModel = new CapturingModel({ ...validContract(), promises: [] });
+    await compileSkillContract(empty, emptyModel);
+    expect(emptyModel.requests[0]!.prompt).toContain("SOURCE_LINES_JSON=[]");
+    await expect(compileSkillContract(empty, new CapturingModel({
+      ...validContract(),
+      promises: [{ statement: "Ghost", evidence: "SKILL.md:1", confidence: 1 }]
+    }))).rejects.toThrow(/evidence locator/u);
+  });
+
+  it("rejects invalid UTF-8 before invoking the model", async () => {
+    const snapshot = await validSnapshot(Uint8Array.from([0xc3, 0x28]));
+    const model = new CapturingModel({ ...validContract(), promises: [] });
+    await expect(compileSkillContract(snapshot, model)).rejects.toThrow(/UTF-8/u);
+    expect(model.requests).toHaveLength(0);
+  });
+
   it("persists exact canonical contract bytes while keeping source and contract hashes separate", async () => {
     const snapshot = await validSnapshot();
     const writes: Array<{ bytes: Buffer; mime: string; redacted: boolean }> = [];
@@ -181,7 +217,13 @@ describe("CodexStructuredModel", () => {
         captured.push(input);
         schemaAtRun = JSON.parse(await readFile(input.output_schema_path, "utf8"));
         await writeFile(input.output_path, JSON.stringify({ answer: "ok" }), { flag: "wx" });
-        return { exit_code: 0, structured_output: { answer: "ok" }, raw_event_count: 0 };
+        const stats = await lstat(input.output_path);
+        return {
+          exit_code: 0,
+          structured_output: { answer: "ok" },
+          raw_event_count: 0,
+          owned_output: { path: input.output_path, dev: stats.dev, ino: stats.ino }
+        };
       }
     };
     const ids = ["collision", "fresh-id"];
@@ -211,12 +253,19 @@ describe("CodexStructuredModel", () => {
     expect(await readFile(sentinel, "utf8")).toBe("keep me");
   });
 
-  it("cleans its exclusive schema on runner failure without deleting a collision sentinel", async () => {
+  it("preserves an output race sentinel when the runner fails without an ownership token", async () => {
     const root = await realpath(await mkdtemp(path.join(tmpdir(), "scta-structured-fail-")));
     roots.push(root);
     const sentinel = path.join(root, ".structured-collision.schema.json");
     await writeFile(sentinel, "keep me");
-    const runner: AgentRunner = { async run() { throw new Error("boom"); } };
+    let racedOutput = "";
+    const runner: AgentRunner = {
+      async run(input) {
+        racedOutput = input.output_path;
+        await writeFile(racedOutput, "runner-race-sentinel", { flag: "wx" });
+        throw new Error("boom");
+      }
+    };
     const ids = ["collision", "fresh-id"];
     const model = new CodexStructuredModel({ runner, tempRoot: root, idFactory: () => ids.shift()! });
 
@@ -229,7 +278,68 @@ describe("CodexStructuredModel", () => {
       timeout_ms: 1234
     })).rejects.toThrow("boom");
 
-    expect(await readdir(root)).toEqual([path.basename(sentinel)]);
+    expect((await readdir(root)).sort()).toEqual([path.basename(sentinel), path.basename(racedOutput)].sort());
     expect((await lstat(sentinel)).isFile()).toBe(true);
+    expect(await readFile(racedOutput, "utf8")).toBe("runner-race-sentinel");
+  });
+
+  it("rejects a shared-writable temporary root and accepts a canonical 0700 root", async () => {
+    const root = await realpath(await mkdtemp(path.join(tmpdir(), "scta-structured-mode-")));
+    roots.push(root);
+    await chmod(root, 0o777);
+    const runner: AgentRunner = { async run() { throw new Error("must not run"); } };
+    const unsafe = new CodexStructuredModel({ runner, tempRoot: root });
+    await expect(unsafe.run({
+      cwd: root, prompt: "x", model: "gpt-5.6", schema: {}, parse: (v) => v, timeout_ms: 1
+    })).rejects.toThrow(/private|owner|mode|writable/u);
+
+    await chmod(root, 0o700);
+    const safeRunner: AgentRunner = {
+      async run(input) {
+        await writeFile(input.output_path, "{}", { flag: "wx" });
+        const stats = await lstat(input.output_path);
+        return {
+          exit_code: 0, structured_output: {}, raw_event_count: 0,
+          owned_output: { path: input.output_path, dev: stats.dev, ino: stats.ino }
+        };
+      }
+    };
+    const safe = new CodexStructuredModel({ runner: safeRunner, tempRoot: root });
+    await expect(safe.run({
+      cwd: root, prompt: "x", model: "gpt-5.6", schema: {}, parse: (v) => v, timeout_ms: 1
+    })).resolves.toEqual({});
+  });
+
+  it("retries a deterministic concurrent schema creation race with the next ID", async () => {
+    const root = await realpath(await mkdtemp(path.join(tmpdir(), "scta-structured-concurrent-")));
+    roots.push(root);
+    const racedSchema = path.join(root, ".structured-shared-id.schema.json");
+    let usedSchema = "";
+    const runner: AgentRunner = {
+      async run(input) {
+        usedSchema = input.output_schema_path;
+        await writeFile(input.output_path, "{}", { flag: "wx" });
+        const stats = await lstat(input.output_path);
+        return {
+          exit_code: 0, structured_output: {}, raw_event_count: 0,
+          owned_output: { path: input.output_path, dev: stats.dev, ino: stats.ino }
+        };
+      }
+    };
+    const ids = ["shared-id", "second-id"];
+    let first = true;
+    const idFactory = () => {
+      const id = ids.shift()!;
+      if (first) {
+        first = false;
+        queueMicrotask(() => writeFileSync(racedSchema, "concurrent-sentinel", { flag: "wx" }));
+      }
+      return id;
+    };
+    const request = { cwd: root, prompt: "x", model: "gpt-5.6" as const, schema: {}, parse: (v: unknown) => v, timeout_ms: 1_000 };
+    await expect(new CodexStructuredModel({ runner, tempRoot: root, idFactory }).run(request))
+      .resolves.toEqual({});
+    expect(path.basename(usedSchema)).toBe(".structured-second-id.schema.json");
+    expect(await readFile(racedSchema, "utf8")).toBe("concurrent-sentinel");
   });
 });

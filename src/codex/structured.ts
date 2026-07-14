@@ -21,6 +21,7 @@ export interface StructuredModel {
 
 export interface CodexStructuredModelOptions {
   runner: AgentRunner;
+  /** Must be the same private 0700 directory configured as the runner's owned output root. */
   tempRoot: string;
   idFactory?: () => string;
   maxAllocationAttempts?: number;
@@ -30,6 +31,13 @@ interface Allocation {
   id: string;
   schemaPath: string;
   outputPath: string;
+  schemaIdentity: OwnedFileIdentity;
+}
+
+interface OwnedFileIdentity {
+  path: string;
+  dev: number;
+  ino: number;
 }
 
 function isMissing(error: unknown): boolean {
@@ -50,11 +58,12 @@ function safeId(value: string): string | undefined {
   return /^[A-Za-z0-9][A-Za-z0-9_-]{7,127}$/u.test(value) ? value : undefined;
 }
 
-async function removeRegularFile(candidate: string): Promise<void> {
+async function removeOwnedFile(identity: OwnedFileIdentity): Promise<void> {
   try {
-    const stats = await lstat(candidate);
-    if (!stats.isFile() || stats.isSymbolicLink() || stats.nlink !== 1) return;
-    await rm(candidate);
+    const stats = await lstat(identity.path);
+    if (!stats.isFile() || stats.isSymbolicLink() || stats.nlink !== 1
+      || stats.dev !== identity.dev || stats.ino !== identity.ino) return;
+    await rm(identity.path);
   } catch (error) {
     if (!isMissing(error)) throw error;
   }
@@ -78,22 +87,9 @@ export class CodexStructuredModel implements StructuredModel {
       throw new TypeError("Structured model must be gpt-5.6");
     }
     const root = await this.#canonicalRoot();
-    const allocation = await this.#allocate(root);
-    let schemaOwned = false;
-    let runnerStarted = false;
+    const allocation = await this.#allocateAndWriteSchema(root, request.schema);
+    let outputIdentity: OwnedFileIdentity | undefined;
     try {
-      const flags = constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL
-        | (constants.O_NOFOLLOW ?? 0);
-      const handle = await open(allocation.schemaPath, flags, 0o600);
-      schemaOwned = true;
-      try {
-        await handle.writeFile(canonicalJson(request.schema), "utf8");
-        await handle.sync();
-      } finally {
-        await handle.close();
-      }
-
-      runnerStarted = true;
       const result = await this.#runner.run({
         run_id: `structured-${allocation.id}`,
         cwd: request.cwd,
@@ -106,10 +102,13 @@ export class CodexStructuredModel implements StructuredModel {
       }, (_event, delivery) => {
         delivery.commit(() => undefined);
       });
+      if (result.owned_output?.path === allocation.outputPath) {
+        outputIdentity = result.owned_output;
+      }
       return request.parse(result.structured_output);
     } finally {
-      if (schemaOwned) await removeRegularFile(allocation.schemaPath);
-      if (runnerStarted) await removeRegularFile(allocation.outputPath);
+      await removeOwnedFile(allocation.schemaIdentity);
+      if (outputIdentity) await removeOwnedFile(outputIdentity);
     }
   }
 
@@ -117,21 +116,54 @@ export class CodexStructuredModel implements StructuredModel {
     await mkdir(this.#configuredRoot, { recursive: true, mode: 0o700 });
     const stats = await lstat(this.#configuredRoot);
     const canonical = await realpath(this.#configuredRoot);
-    if (!stats.isDirectory() || stats.isSymbolicLink() || canonical !== this.#configuredRoot) {
-      throw new Error("Structured temporary root must be a canonical directory");
+    const after = await lstat(this.#configuredRoot);
+    const uid = process.getuid?.();
+    if (!stats.isDirectory() || stats.isSymbolicLink() || canonical !== this.#configuredRoot
+      || after.dev !== stats.dev || after.ino !== stats.ino
+      || !after.isDirectory() || after.isSymbolicLink()
+      || uid === undefined || after.uid !== uid || (after.mode & 0o077) !== 0) {
+      throw new Error("Structured temporary root must be a private owner-only canonical directory");
     }
     return canonical;
   }
 
-  async #allocate(root: string): Promise<Allocation> {
+  async #allocateAndWriteSchema(
+    root: string,
+    schema: Record<string, unknown>
+  ): Promise<Allocation> {
     for (let attempt = 0; attempt < this.#maxAllocationAttempts; attempt += 1) {
       const id = safeId(this.#idFactory());
       if (!id) continue;
       const schemaPath = path.join(root, `.structured-${id}.schema.json`);
       const outputPath = path.join(root, `.structured-${id}.output.json`);
       if (path.dirname(schemaPath) !== root || path.dirname(outputPath) !== root) continue;
-      if (await exists(schemaPath) || await exists(outputPath)) continue;
-      return { id, schemaPath, outputPath };
+      if (await exists(outputPath)) continue;
+      const flags = constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL
+        | (constants.O_NOFOLLOW ?? 0);
+      let handle;
+      try {
+        handle = await open(schemaPath, flags, 0o600);
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code === "EEXIST") continue;
+        throw error;
+      }
+      const openedStats = await handle.stat();
+      const identity: OwnedFileIdentity = {
+        path: schemaPath,
+        dev: openedStats.dev,
+        ino: openedStats.ino
+      };
+      try {
+        await handle.writeFile(canonicalJson(schema), "utf8");
+        await handle.sync();
+      } catch (error) {
+        await handle.close().catch(() => undefined);
+        await removeOwnedFile(identity);
+        throw error;
+      } finally {
+        await handle.close().catch(() => undefined);
+      }
+      return { id, schemaPath, outputPath, schemaIdentity: identity };
     }
     throw new Error("Unable to allocate structured model temporary files");
   }
