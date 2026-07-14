@@ -32,3 +32,30 @@
 ## Residual assumptions
 
 Portable Node does not expose `openat(2)` or a cross-platform directory `RENAME_NOREPLACE`. Repeated `lstat`/`realpath` containment checks, no-follow file opens, unpredictable staging names, and post-rename verification narrow path-swap races, but a hostile process running as the same OS user can still win a TOCTOU race by replacing directories between syscalls. The injected imports root is therefore assumed to be controlled by the application user and not concurrently mutated by another hostile same-user process.
+
+## Security review fix (2026-07-14)
+
+### TDD evidence
+
+- RED: the expanded focused run had 11 new failures and 130 existing passes. The failures covered ancestor symlinks, local aggregate caps, Git provenance, portable ZIP collisions, ZIP flags/disk/header/CRC checks, a huge declared directory, and staging error wrapping.
+- First GREEN attempt: typecheck passed; 7 compatibility failures remained (six empty-root assertions and one concurrent publication race).
+- GREEN: focused verification passed all 141 repository tests after preserving reject-before-publication semantics and revalidating concurrent component creation.
+
+### Fixes
+
+- ZIP preflight now accounts for every central entry before `unzipSync`, requires zero-sized/zero-CRC stored directory entries, rejects ZIP64/multi-disk/encryption/data descriptors/unsupported flags or methods/extras, validates local headers and non-overlap, and CRC32-checks extracted regular files.
+- Local, ZIP, and imports-root paths reject symlinks in preexisting ancestor components. Missing imports-root components are created one at a time and revalidated, including concurrent `EEXIST` winners.
+- Every import mode uses NFC plus case-folded portable file/directory collision validation; local and Git collection share 200-file, 5 MiB aggregate, and 2 MiB per-file limits.
+- Git source identity uses canonical file URIs for local locators and strips remote userinfo, query, and fragment while preserving the detached resolved commit.
+- Staging creation/write/mode/rename/verification failures are typed and path-safe; cleanup is best effort and cannot mask the original failure.
+
+### Final shape
+
+- Production remains limited to `src/core/importer.ts` and `src/core/zip-import.ts`.
+- Line counts: importer 831; ZIP importer 306. Top-level functions: 27 and 13. Longest top-level functions: 64 and 59 lines respectively.
+- The duplicate portable-path checks are intentional: ZIP must reject conflicts before `unzipSync`, while the importer applies the same invariant to every mode. No dead production code was found in the final pass.
+
+### Final validation
+
+- `pnpm typecheck && pnpm test && git diff --check` passed with 141/141 tests.
+- The unchanged sample's successful Task 6 `quick_validate.py` result remains recorded above. This rerun could not initialize the sandboxed uv cache, and the bundled Python fallback lacked PyYAML; no broader escalation or dependency change was made.

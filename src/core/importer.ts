@@ -33,6 +33,9 @@ import {
 
 const exec = promisify(execFile);
 const MAX_FILE_BYTES = 2 * 1024 * 1024;
+const MAX_IMPORT_FILES = 200;
+const MAX_IMPORT_BYTES = 5 * 1024 * 1024;
+const MAX_ARCHIVE_BYTES = 16 * 1024 * 1024;
 const EXCLUDED_NAMES = new Set([".git", "node_modules", ".arena"]);
 const SAMPLE_IDS = new Set(["repo-bugfix"]);
 
@@ -47,6 +50,9 @@ export type ImportInspectionErrorCode =
   | "SYMLINK_REJECTED"
   | "NON_REGULAR_FILE"
   | "FILE_TOO_LARGE"
+  | "TOO_MANY_FILES"
+  | "IMPORT_TOO_LARGE"
+  | "PATH_COLLISION"
   | "GIT_IMPORT_FAILED"
   | "INVALID_ZIP"
   | "ZIP_PATH_TRAVERSAL"
@@ -140,31 +146,75 @@ async function canonicalDirectory(
   errorCode: "SOURCE_UNAVAILABLE" | "IMPORTS_ROOT_INVALID",
   create: boolean
 ): Promise<string> {
+  const absolute = path.resolve(configuredPath);
+  const parsed = path.parse(absolute);
+  const components = absolute.slice(parsed.root.length).split(path.sep).filter(Boolean);
+  let current = parsed.root;
   try {
-    if (create) {
-      await mkdir(configuredPath, { recursive: true });
-    }
-    const configuredStats = await lstat(configuredPath);
-    if (configuredStats.isSymbolicLink()) {
-      if (errorCode === "SOURCE_UNAVAILABLE") {
-        failure("SYMLINK_REJECTED");
+    for (let index = 0; index < components.length; index += 1) {
+      current = path.join(current, components[index]!);
+      let stats;
+      try {
+        stats = await lstat(current);
+      } catch (error) {
+        if (!create || !isErrno(error, "ENOENT")) {
+          throw error;
+        }
+        try {
+          await mkdir(current, { mode: 0o700 });
+        } catch (mkdirError) {
+          if (!isErrno(mkdirError, "EEXIST")) {
+            throw mkdirError;
+          }
+        }
+        stats = await lstat(current);
       }
-      failure(errorCode);
+      if (stats.isSymbolicLink()) {
+        failure(errorCode === "SOURCE_UNAVAILABLE" ? "SYMLINK_REJECTED" : errorCode);
+      }
+      if (!stats.isDirectory()) {
+        failure(errorCode);
+      }
     }
-    if (!configuredStats.isDirectory()) {
-      failure(errorCode);
-    }
-    const canonical = await realpath(configuredPath);
-    const canonicalStats = await lstat(canonical);
-    if (!canonicalStats.isDirectory() || canonicalStats.isSymbolicLink()) {
-      failure(errorCode);
-    }
+    const canonical = await realpath(absolute);
     return canonical;
   } catch (error) {
     if (error instanceof ImportInspectionError) {
       throw error;
     }
     failure(errorCode);
+  }
+}
+
+async function canonicalRegularFile(configuredPath: string): Promise<{
+  canonical: string;
+  stats: Awaited<ReturnType<typeof lstat>>;
+}> {
+  const absolute = path.resolve(configuredPath);
+  const parsed = path.parse(absolute);
+  const components = absolute.slice(parsed.root.length).split(path.sep).filter(Boolean);
+  let current = parsed.root;
+  try {
+    let stats = await lstat(current);
+    for (let index = 0; index < components.length; index += 1) {
+      current = path.join(current, components[index]!);
+      stats = await lstat(current);
+      if (stats.isSymbolicLink()) {
+        failure("SYMLINK_REJECTED");
+      }
+      if (index < components.length - 1 && !stats.isDirectory()) {
+        failure("SOURCE_UNAVAILABLE");
+      }
+    }
+    if (!stats.isFile()) {
+      failure("SOURCE_UNAVAILABLE");
+    }
+    return { canonical: await realpath(absolute), stats };
+  } catch (error) {
+    if (error instanceof ImportInspectionError) {
+      throw error;
+    }
+    failure("SOURCE_UNAVAILABLE");
   }
 }
 
@@ -225,13 +275,14 @@ async function securelyReadFile(
     }
     failure("SOURCE_UNAVAILABLE", { path: safePath });
   } finally {
-    await handle?.close();
+    await handle?.close().catch(() => undefined);
   }
   failure("SOURCE_UNAVAILABLE", { path: safePath });
 }
 
 async function collectLocalFiles(root: string): Promise<AcceptedFile[]> {
   const files: AcceptedFile[] = [];
+  let totalBytes = 0;
 
   async function visit(directory: string): Promise<void> {
     let directoryRealPath;
@@ -271,6 +322,13 @@ async function collectLocalFiles(root: string): Promise<AcceptedFile[]> {
       if (entryStats.isDirectory()) {
         await visit(absolutePath);
       } else if (entryStats.isFile()) {
+        if (files.length >= MAX_IMPORT_FILES) {
+          failure("TOO_MANY_FILES", { limit: MAX_IMPORT_FILES });
+        }
+        if (totalBytes + entryStats.size > MAX_IMPORT_BYTES) {
+          failure("IMPORT_TOO_LARGE", { limit_bytes: MAX_IMPORT_BYTES });
+        }
+        totalBytes += entryStats.size;
         files.push({
           path: safePath,
           data: await securelyReadFile(absolutePath, safePath, entryStats)
@@ -283,6 +341,35 @@ async function collectLocalFiles(root: string): Promise<AcceptedFile[]> {
 
   await visit(root);
   return files.sort((left, right) => comparePaths(left.path, right.path));
+}
+
+function portableKey(value: string): string {
+  return value.normalize("NFC").toLowerCase();
+}
+
+function validatePortableFiles(
+  files: readonly AcceptedFile[],
+  code: "PATH_COLLISION" | "ZIP_PATH_CONFLICT"
+): void {
+  const acceptedFiles = new Map<string, string>();
+  const directories = new Map<string, string>();
+  for (const file of files) {
+    const parts = file.path.split("/");
+    const ancestors = parts.slice(0, -1).map((_, index) => parts.slice(0, index + 1).join("/"));
+    for (const ancestor of ancestors) {
+      const key = portableKey(ancestor);
+      const previous = directories.get(key);
+      if (acceptedFiles.has(key) || (previous !== undefined && previous !== ancestor)) {
+        failure(code, { path: ancestor });
+      }
+      directories.set(key, ancestor);
+    }
+    const key = portableKey(file.path);
+    if (acceptedFiles.has(key) || directories.has(key)) {
+      failure(code, { path: file.path });
+    }
+    acceptedFiles.set(key, file.path);
+  }
 }
 
 async function inspectLocal(
@@ -325,6 +412,44 @@ const GIT_SAFE_CONFIG = [
   "-c", "filter.lfs.required=false"
 ];
 
+export function sanitizeGitProvenance(locator: string): string {
+  try {
+    const url = new URL(locator);
+    if (url.protocol === "file:") {
+      return url.href;
+    }
+    url.username = "";
+    url.password = "";
+    url.search = "";
+    url.hash = "";
+    return url.href;
+  } catch {
+    return locator
+      .replace(/[?#].*$/, "")
+      .replace(/^[^/@:]+@(?=[^/:]+:)/, "");
+  }
+}
+
+async function canonicalGitProvenance(locator: string): Promise<string> {
+  if (locator.startsWith("file:")) {
+    const root = await canonicalDirectory(fileURLToPath(locator), "SOURCE_UNAVAILABLE", false);
+    return pathToFileURL(root).href;
+  }
+  const candidate = path.resolve(locator);
+  try {
+    const stats = await lstat(candidate);
+    if (stats.isDirectory() || stats.isSymbolicLink()) {
+      const root = await canonicalDirectory(candidate, "SOURCE_UNAVAILABLE", false);
+      return pathToFileURL(root).href;
+    }
+  } catch (error) {
+    if (error instanceof ImportInspectionError) {
+      throw error;
+    }
+  }
+  return sanitizeGitProvenance(locator);
+}
+
 async function runGit(args: string[]): Promise<string> {
   try {
     const result = await exec("git", [...GIT_SAFE_CONFIG, ...args], {
@@ -338,9 +463,10 @@ async function runGit(args: string[]): Promise<string> {
 }
 
 async function inspectGit(request: Extract<ImportRequest, { kind: "git" }>): Promise<Inspection> {
-  const temporary = await mkdtemp(path.join(tmpdir(), "scta-git-import-"));
+  const temporary = await realpath(await mkdtemp(path.join(tmpdir(), "scta-git-import-")));
   const checkout = path.join(temporary, "checkout");
   try {
+    const provenance = await canonicalGitProvenance(request.url);
     await runGit([
       "clone",
       "--no-checkout",
@@ -366,7 +492,7 @@ async function inspectGit(request: Extract<ImportRequest, { kind: "git" }>): Pro
     const canonicalCheckout = await canonicalDirectory(checkout, "SOURCE_UNAVAILABLE", false);
     const source = {
       kind: "git" as const,
-      uri: request.url,
+      uri: provenance,
       revision: resolvedRevision
     };
     return {
@@ -376,7 +502,7 @@ async function inspectGit(request: Extract<ImportRequest, { kind: "git" }>): Pro
       ...(request.entrypoint === undefined ? {} : { requestedEntrypoint: request.entrypoint })
     };
   } finally {
-    await rm(temporary, { recursive: true, force: true });
+    await rm(temporary, { recursive: true, force: true }).catch(() => undefined);
   }
 }
 
@@ -384,9 +510,37 @@ async function inspectZip(
   archivePath: string,
   entrypoint?: string
 ): Promise<Inspection> {
-  let imported;
+  const archive = await canonicalRegularFile(archivePath);
+  if (archive.stats.size > MAX_ARCHIVE_BYTES) {
+    failure("SOURCE_UNAVAILABLE");
+  }
+  let handle;
+  let data: Buffer;
   try {
-    imported = await inspectZipArchive(archivePath);
+    handle = await open(archive.canonical, constants.O_RDONLY | constants.O_NOFOLLOW);
+    const opened = await handle.stat();
+    if (
+      !opened.isFile() || opened.dev !== archive.stats.dev || opened.ino !== archive.stats.ino
+      || opened.size > MAX_ARCHIVE_BYTES
+    ) {
+      failure("SOURCE_UNAVAILABLE");
+    }
+    data = await handle.readFile();
+    const after = await handle.stat();
+    if (after.size !== opened.size || after.mtimeMs !== opened.mtimeMs || data.byteLength !== opened.size) {
+      failure("SOURCE_UNAVAILABLE");
+    }
+  } catch (error) {
+    if (error instanceof ImportInspectionError) {
+      throw error;
+    }
+    failure("SOURCE_UNAVAILABLE");
+  } finally {
+    await handle?.close().catch(() => undefined);
+  }
+  let files;
+  try {
+    files = inspectZipArchive(data);
   } catch (error) {
     if (error instanceof ZipInspectionError) {
       failure(error.code, error.details);
@@ -395,12 +549,12 @@ async function inspectZip(
   }
   const source = {
     kind: "zip" as const,
-    uri: pathToFileURL(imported.canonicalArchive).href
+    uri: pathToFileURL(archive.canonical).href
   };
   return {
     source,
     identity: source,
-    files: imported.files,
+    files,
     ...(entrypoint === undefined ? {} : { requestedEntrypoint: entrypoint })
   };
 }
@@ -525,9 +679,9 @@ async function writeStagingSnapshot(
   if (path.dirname(staging) !== root) {
     failure("PUBLICATION_FAILED");
   }
-  await assertStableDirectory(root, "PUBLICATION_FAILED");
-  await mkdir(staging, { mode: 0o700 });
   try {
+    await assertStableDirectory(root, "PUBLICATION_FAILED");
+    await mkdir(staging, { mode: 0o700 });
     await assertStableDirectory(root, "PUBLICATION_FAILED");
     await assertStableDirectory(staging, "PUBLICATION_FAILED");
     for (const file of files) {
@@ -565,8 +719,11 @@ async function writeStagingSnapshot(
     await chmod(staging, 0o555);
     return staging;
   } catch (error) {
-    await rm(staging, { recursive: true, force: true });
-    throw error;
+    await rm(staging, { recursive: true, force: true }).catch(() => undefined);
+    if (error instanceof ImportInspectionError) {
+      throw error;
+    }
+    failure("PUBLICATION_FAILED");
   }
 }
 
@@ -603,16 +760,23 @@ async function publishSnapshot(
     await assertStableDirectory(staging, "PUBLICATION_FAILED");
     try {
       await rename(staging, destination);
-    } catch {
+    } catch (error) {
       // Node has no portable rename-no-replace operation for directories.
       // A concurrent winner is accepted only after full content verification.
+      try {
+        await lstat(destination);
+      } catch {
+        failure("PUBLICATION_FAILED");
+      }
+      await assertSnapshotMatches(destination, manifest);
+      return destination;
     }
     await assertStableDirectory(root, "PUBLICATION_FAILED");
     await assertSnapshotMatches(destination, manifest);
     return destination;
   } finally {
     await chmod(staging, 0o700).catch(() => undefined);
-    await rm(staging, { recursive: true, force: true });
+    await rm(staging, { recursive: true, force: true }).catch(() => undefined);
   }
 }
 
@@ -620,7 +784,6 @@ export async function importSkill(
   request: ImportRequest,
   importsRoot: string
 ): Promise<SkillSnapshot> {
-  const root = await canonicalDirectory(importsRoot, "IMPORTS_ROOT_INVALID", true);
   let inspection: Inspection;
   switch (request.kind) {
     case "local":
@@ -636,6 +799,11 @@ export async function importSkill(
       inspection = await inspectSample(request);
       break;
   }
+  validatePortableFiles(
+    inspection.files,
+    request.kind === "zip" ? "ZIP_PATH_CONFLICT" : "PATH_COLLISION"
+  );
+  const root = await canonicalDirectory(importsRoot, "IMPORTS_ROOT_INVALID", true);
 
   if (inspection.files.length === 0) {
     failure("ENTRYPOINT_REQUIRED", { candidates: [] });

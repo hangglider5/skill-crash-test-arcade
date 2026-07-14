@@ -7,6 +7,7 @@ import {
   mkdtemp,
   readFile,
   readdir,
+  realpath,
   rm,
   stat,
   symlink,
@@ -14,6 +15,7 @@ import {
 } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
+import { pathToFileURL } from "node:url";
 import { promisify } from "node:util";
 
 import { strToU8, zipSync, type Zippable } from "fflate";
@@ -21,14 +23,15 @@ import { describe, expect, it } from "vitest";
 
 import {
   ImportInspectionError,
-  importSkill
+  importSkill,
+  sanitizeGitProvenance
 } from "../../src/core/importer.js";
 
 const exec = promisify(execFile);
 const MiB = 1024 * 1024;
 
 async function temporaryRoot(prefix = "scta-import-"): Promise<string> {
-  return mkdtemp(path.join(tmpdir(), prefix));
+  return realpath(await mkdtemp(path.join(tmpdir(), prefix)));
 }
 
 async function mkdirSkill(
@@ -91,6 +94,28 @@ async function writeZip(
 ): Promise<string> {
   const archive = path.join(root, name);
   await writeFile(archive, zipSync(entries));
+  return archive;
+}
+
+function zipOffsets(archive: Uint8Array): { central: number; local: number } {
+  const bytes = Buffer.from(archive);
+  const central = bytes.indexOf(Buffer.from([0x50, 0x4b, 0x01, 0x02]));
+  const local = bytes.indexOf(Buffer.from([0x50, 0x4b, 0x03, 0x04]));
+  if (central < 0 || local < 0) {
+    throw new Error("expected ZIP headers");
+  }
+  return { central, local };
+}
+
+async function writeMutatedZip(
+  root: string,
+  mutate: (bytes: Buffer, offsets: { central: number; local: number }) => void,
+  name: string
+): Promise<string> {
+  const bytes = Buffer.from(zipSync({ "SKILL.md": strToU8("# Skill\n") }));
+  mutate(bytes, zipOffsets(bytes));
+  const archive = path.join(root, name);
+  await writeFile(archive, bytes);
   return archive;
 }
 
@@ -181,6 +206,58 @@ describe("read-only local Skill import", () => {
       { kind: "local", path: source }, path.join(root, "fifo-imports")
     )).rejects.toMatchObject({ code: "NON_REGULAR_FILE" });
   });
+
+  it("rejects a symlink in a local source ancestor", async () => {
+    const root = await temporaryRoot();
+    const actualParent = path.join(root, "actual-parent");
+    await mkdirSkill(path.join(actualParent, "source"));
+    await symlink(actualParent, path.join(root, "linked-parent"));
+    await expect(importSkill(
+      { kind: "local", path: path.join(root, "linked-parent", "source") },
+      path.join(root, "imports")
+    )).rejects.toMatchObject({ code: "SYMLINK_REJECTED" });
+    await expect(lstat(path.join(root, "imports"))).rejects.toMatchObject({ code: "ENOENT" });
+  });
+
+  it("enforces portable collision keys when the local filesystem can represent them", async () => {
+    const root = await temporaryRoot();
+    const source = path.join(root, "source");
+    await mkdirSkill(source);
+    await writeFile(path.join(source, "Portable.txt"), "upper");
+    await writeFile(path.join(source, "portable.TXT"), "lower");
+    const names = await readdir(source);
+    if (names.includes("Portable.txt") && names.includes("portable.TXT")) {
+      await expect(importSkill({ kind: "local", path: source }, path.join(root, "imports")))
+        .rejects.toMatchObject({ code: "PATH_COLLISION" });
+    }
+  });
+
+  it("caps local imports at 200 files and 5 MiB in aggregate", async () => {
+    const root = await temporaryRoot();
+    const source = path.join(root, "source");
+    const skill = "# Skill\n";
+    await mkdirSkill(source, skill);
+    for (let index = 0; index < 199; index += 1) {
+      await writeFile(path.join(source, `file-${index}.txt`), "");
+    }
+    await expect(importSkill({ kind: "local", path: source }, path.join(root, "at-file-limit")))
+      .resolves.toMatchObject({ source_hash: expect.any(String) });
+    await writeFile(path.join(source, "one-too-many.txt"), "");
+    await expect(importSkill({ kind: "local", path: source }, path.join(root, "over-file-limit")))
+      .rejects.toMatchObject({ code: "TOO_MANY_FILES" });
+
+    const bytesRoot = path.join(root, "bytes-source");
+    await mkdirSkill(bytesRoot, skill);
+    const remaining = 5 * MiB - Buffer.byteLength(skill);
+    await writeFile(path.join(bytesRoot, "a.bin"), Buffer.alloc(2 * MiB));
+    await writeFile(path.join(bytesRoot, "b.bin"), Buffer.alloc(2 * MiB));
+    await writeFile(path.join(bytesRoot, "c.bin"), Buffer.alloc(remaining - 4 * MiB));
+    await expect(importSkill({ kind: "local", path: bytesRoot }, path.join(root, "at-byte-limit")))
+      .resolves.toMatchObject({ source_hash: expect.any(String) });
+    await writeFile(path.join(bytesRoot, "over.bin"), "x");
+    await expect(importSkill({ kind: "local", path: bytesRoot }, path.join(root, "over-byte-limit")))
+      .rejects.toMatchObject({ code: "IMPORT_TOO_LARGE" });
+  });
 });
 
 describe("Git Skill import", () => {
@@ -229,6 +306,23 @@ describe("Git Skill import", () => {
     const after = (await readdir(tmpdir())).filter((name) => name.startsWith("scta-git-import-") && !before.has(name));
     expect(after).toEqual([]);
   });
+
+  it("canonicalizes local Git locator variants and strips remote secrets", async () => {
+    const root = await temporaryRoot("scta-git-provenance-");
+    const { repository } = await createRepository(root);
+    const requests = [repository, path.relative(process.cwd(), repository), pathToFileURL(repository).href];
+    const snapshots = await Promise.all(requests.map((url, index) => importSkill(
+      { kind: "git", url }, path.join(root, `imports-${index}`)
+    )));
+    const canonical = pathToFileURL(await realpath(repository)).href;
+    expect(new Set(snapshots.map((snapshot) => snapshot.source_hash)))
+      .toEqual(new Set([snapshots[0]!.source_hash]));
+    expect(snapshots.map((snapshot) => snapshot.source.uri)).toEqual([canonical, canonical, canonical]);
+    expect(sanitizeGitProvenance("https://user:password@example.test/repo.git?token=secret#private"))
+      .toBe("https://example.test/repo.git");
+    expect(sanitizeGitProvenance("ssh://user@example.test/repo.git?token=secret#private"))
+      .toBe("ssh://example.test/repo.git");
+  });
 });
 
 describe("bounded ZIP Skill import", () => {
@@ -257,7 +351,11 @@ describe("bounded ZIP Skill import", () => {
     const archive = await writeZip(root, { [invalidPath]: strToU8("bad") });
     await expect(importSkill({ kind: "zip", path: archive }, path.join(root, "imports")))
       .rejects.toMatchObject({ code: "ZIP_PATH_TRAVERSAL" });
-    await expect(readdir(path.join(root, "imports"))).resolves.toEqual([]);
+    const published = await readdir(path.join(root, "imports")).catch((error: NodeJS.ErrnoException) => {
+      if (error.code === "ENOENT") return [];
+      throw error;
+    });
+    expect(published).toEqual([]);
   });
 
   it("rejects duplicate names and file-directory conflicts", async () => {
@@ -311,6 +409,96 @@ describe("bounded ZIP Skill import", () => {
     await writeFile(bomb, bytes);
     await expect(importSkill({ kind: "zip", path: bomb }, path.join(root, "bomb-imports")))
       .rejects.toMatchObject({ code: "ZIP_TOO_LARGE" });
+  });
+
+  it("rejects case-folded and Unicode-normalized ZIP path conflicts", async () => {
+    const root = await temporaryRoot("scta-zip-portable-conflict-");
+    const caseConflict = await writeZip(root, {
+      "Docs/SKILL.md": strToU8("# Skill"),
+      "docs/note.txt": strToU8("note")
+    }, "case.zip");
+    await expect(importSkill({ kind: "zip", path: caseConflict }, path.join(root, "case-imports")))
+      .rejects.toMatchObject({ code: "ZIP_PATH_CONFLICT" });
+    const unicodeConflict = await writeZip(root, {
+      "caf\u00e9/SKILL.md": strToU8("# Skill"),
+      "cafe\u0301/note.txt": strToU8("note")
+    }, "unicode.zip");
+    await expect(importSkill({ kind: "zip", path: unicodeConflict }, path.join(root, "unicode-imports")))
+      .rejects.toMatchObject({ code: "ZIP_PATH_CONFLICT" });
+  });
+
+  it("rejects unsupported ZIP flags and nonzero entry disks", async () => {
+    const root = await temporaryRoot("scta-zip-features-");
+    const cases: Array<[string, (bytes: Buffer, offsets: { central: number; local: number }) => void]> = [
+      ["encrypted.zip", (bytes, { central, local }) => {
+        bytes.writeUInt16LE(bytes.readUInt16LE(central + 8) | 1, central + 8);
+        bytes.writeUInt16LE(bytes.readUInt16LE(local + 6) | 1, local + 6);
+      }],
+      ["descriptor.zip", (bytes, { central, local }) => {
+        bytes.writeUInt16LE(bytes.readUInt16LE(central + 8) | 8, central + 8);
+        bytes.writeUInt16LE(bytes.readUInt16LE(local + 6) | 8, local + 6);
+      }],
+      ["disk.zip", (bytes, { central }) => bytes.writeUInt16LE(1, central + 34)]
+    ];
+    for (const [name, mutate] of cases) {
+      const archive = await writeMutatedZip(root, mutate, name);
+      await expect(importSkill({ kind: "zip", path: archive }, path.join(root, `${name}-imports`)))
+        .rejects.toMatchObject({ code: "INVALID_ZIP" });
+    }
+  });
+
+  it("rejects local/central ZIP metadata mismatches before extraction", async () => {
+    const root = await temporaryRoot("scta-zip-header-mismatch-");
+    const cases: Array<[string, (bytes: Buffer, offsets: { central: number; local: number }) => void]> = [
+      ["name.zip", (bytes, { local }) => { bytes[local + 30] = bytes[local + 30]! ^ 1; }],
+      ["method.zip", (bytes, { local }) => {
+        bytes.writeUInt16LE(bytes.readUInt16LE(local + 8) === 0 ? 8 : 0, local + 8);
+      }],
+      ["size.zip", (bytes, { local }) => {
+        bytes.writeUInt32LE(bytes.readUInt32LE(local + 22) + 1, local + 22);
+      }]
+    ];
+    for (const [name, mutate] of cases) {
+      const archive = await writeMutatedZip(root, mutate, name);
+      await expect(importSkill({ kind: "zip", path: archive }, path.join(root, `${name}-imports`)))
+        .rejects.toMatchObject({ code: "INVALID_ZIP" });
+    }
+  });
+
+  it("verifies extracted file CRC32 against the validated headers", async () => {
+    const root = await temporaryRoot("scta-zip-crc-");
+    const archive = await writeMutatedZip(root, (bytes, { central, local }) => {
+      const wrongCrc = (bytes.readUInt32LE(central + 16) ^ 0xffffffff) >>> 0;
+      bytes.writeUInt32LE(wrongCrc, central + 16);
+      bytes.writeUInt32LE(wrongCrc, local + 14);
+    }, "crc.zip");
+    await expect(importSkill({ kind: "zip", path: archive }, path.join(root, "imports")))
+      .rejects.toMatchObject({ code: "INVALID_ZIP" });
+  });
+
+  it("rejects a huge declared directory before decompression", async () => {
+    const root = await temporaryRoot("scta-zip-directory-bomb-");
+    const bytes = Buffer.from(zipSync({ "huge/": new Uint8Array(), "SKILL.md": strToU8("# Skill") }));
+    const central = bytes.indexOf(Buffer.from([0x50, 0x4b, 0x01, 0x02]));
+    expect(central).toBeGreaterThanOrEqual(0);
+    bytes.writeUInt32LE(6 * MiB, central + 24);
+    const archive = path.join(root, "directory-bomb.zip");
+    await writeFile(archive, bytes);
+    await expect(importSkill({ kind: "zip", path: archive }, path.join(root, "imports")))
+      .rejects.toMatchObject({ code: "ZIP_TOO_LARGE" });
+  });
+
+  it("rejects a symlink in the ZIP source ancestor", async () => {
+    const root = await temporaryRoot("scta-zip-ancestor-");
+    const actualParent = path.join(root, "actual-parent");
+    await mkdir(actualParent);
+    const archive = await writeZip(actualParent, { "SKILL.md": strToU8("# Skill") });
+    await symlink(actualParent, path.join(root, "linked-parent"));
+    await expect(importSkill(
+      { kind: "zip", path: path.join(root, "linked-parent", path.basename(archive)) },
+      path.join(root, "imports")
+    )).rejects.toMatchObject({ code: "SYMLINK_REJECTED" });
+    await expect(lstat(path.join(root, "imports"))).rejects.toMatchObject({ code: "ENOENT" });
   });
 });
 
@@ -402,6 +590,41 @@ describe("entrypoint, identity, and publication", () => {
     await expect(importSkill(
       { kind: "local", path: source }, path.join(root, "linked-imports")
     )).rejects.toMatchObject({ code: "IMPORTS_ROOT_INVALID" });
+  });
+
+  it("rejects a symlinked imports-root ancestor before creating descendants", async () => {
+    const root = await temporaryRoot();
+    const source = path.join(root, "source");
+    const actualParent = path.join(root, "actual-import-parent");
+    await mkdirSkill(source);
+    await mkdir(actualParent);
+    await symlink(actualParent, path.join(root, "linked-import-parent"));
+    await expect(importSkill(
+      { kind: "local", path: source }, path.join(root, "linked-import-parent", "missing", "imports")
+    )).rejects.toMatchObject({ code: "IMPORTS_ROOT_INVALID" });
+    await expect(lstat(path.join(actualParent, "missing"))).rejects.toMatchObject({ code: "ENOENT" });
+  });
+
+  it("wraps invalid roots and staging creation failures without leaking paths", async () => {
+    const root = await temporaryRoot("private-publication-");
+    const source = path.join(root, "source");
+    await mkdirSkill(source);
+    const invalidRoot = path.join(root, "invalid-root");
+    await writeFile(invalidRoot, "not a directory");
+    await expect(importSkill({ kind: "local", path: source }, invalidRoot))
+      .rejects.toMatchObject({ code: "IMPORTS_ROOT_INVALID", details: {} });
+
+    if (process.platform !== "win32" && process.getuid?.() !== 0) {
+      const unwritableRoot = path.join(root, "unwritable-root");
+      await mkdir(unwritableRoot, { mode: 0o555 });
+      try {
+        await expect(importSkill({ kind: "local", path: source }, unwritableRoot))
+          .rejects.toMatchObject({ code: "PUBLICATION_FAILED", details: {} });
+        expect((await readdir(unwritableRoot)).filter((name) => name.startsWith(".stage-"))).toEqual([]);
+      } finally {
+        await chmod(unwritableRoot, 0o755);
+      }
+    }
   });
 
   it("keeps ImportInspectionError details free of original absolute paths", async () => {
