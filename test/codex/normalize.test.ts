@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { normalizeCodexEvent } from "../../src/codex/normalize.js";
+import { NormalizerArtifactError, normalizeCodexEvent } from "../../src/codex/normalize.js";
 import type { ArtifactSink, NormalizeContext } from "../../src/codex/types.js";
 
 class RecordingSink implements ArtifactSink {
@@ -59,7 +59,8 @@ describe("normalizeCodexEvent", () => {
     await expect(normalizeCodexEvent({
       type: "item.completed",
       item: { id: "cmd", type: "command_execution", command: "test", aggregated_output: "x".repeat(50), exit_code: 1 }
-    }, context({ max_inline_output_bytes: 16 }))).rejects.toThrow("artifact sink");
+    }, context({ max_inline_output_bytes: 16 })))
+      .rejects.toMatchObject({ code: "NORMALIZER_ARTIFACT_REQUIRED" });
   });
 
   it("projects unknown events to safe metadata without reasoning or text", async () => {
@@ -112,8 +113,94 @@ describe("normalizeCodexEvent", () => {
       item: { id: "first", type: "command_execution", command: "first", aggregated_output: "too large", exit_code: 0 }
     }, ctx);
     const second = normalizeCodexEvent({ type: "thread.started", thread_id: "second" }, ctx);
-    await expect(first).rejects.toThrow("sink failed");
+    await expect(first).rejects.toMatchObject({ code: "NORMALIZER_ARTIFACT_REJECTED" });
     await expect(second).resolves.toMatchObject([{ seq: 4, kind: "run.started" }]);
     expect(ctx.next_seq).toBe(5);
+  });
+
+  it("maps a rejecting artifact sink to a typed safe error and accepts the next sink write", async () => {
+    let calls = 0;
+    const sink: ArtifactSink = {
+      put: async () => {
+        calls += 1;
+        if (calls === 1) throw new Error("private bucket and credential details");
+        return { ref: `sha256:${"c".repeat(64)}` as const };
+      }
+    };
+    const ctx = context({ artifact_sink: sink, max_inline_output_bytes: 4 });
+    const raw = (id: string) => ({
+      type: "item.completed",
+      item: { id, type: "command_execution", command: id, aggregated_output: "large output", exit_code: 0 }
+    });
+
+    let caught: unknown;
+    try { await normalizeCodexEvent(raw("first"), ctx); } catch (error) { caught = error; }
+    expect(caught).toBeInstanceOf(NormalizerArtifactError);
+    expect(caught).toMatchObject({ code: "NORMALIZER_ARTIFACT_REJECTED" });
+    expect((caught as Error).message).not.toContain("private bucket");
+    await expect(normalizeCodexEvent(raw("second"), ctx)).resolves.toMatchObject([
+      { seq: 4, span_id: "second", artifacts: [`sha256:${"c".repeat(64)}`] }
+    ]);
+    expect(ctx.next_seq).toBe(5);
+  });
+
+  it("times out a never-settling sink, aborts it, and leaves the context queue usable", async () => {
+    let calls = 0;
+    let abortObserved = false;
+    const sink: ArtifactSink = {
+      put: (_data, _metadata, options) => {
+        calls += 1;
+        if (calls === 1) {
+          options.signal.addEventListener("abort", () => { abortObserved = true; }, { once: true });
+          return new Promise(() => {});
+        }
+        return Promise.resolve({ ref: `sha256:${"d".repeat(64)}` as const });
+      }
+    };
+    const ctx = context({
+      artifact_sink: sink,
+      artifact_sink_timeout_ms: 15,
+      max_inline_output_bytes: 4
+    });
+    const raw = (id: string) => ({
+      type: "item.completed",
+      item: { id, type: "command_execution", command: id, aggregated_output: "large output", exit_code: 0 }
+    });
+
+    await expect(normalizeCodexEvent(raw("first"), ctx))
+      .rejects.toMatchObject({ code: "NORMALIZER_ARTIFACT_TIMEOUT" });
+    expect(abortObserved).toBe(true);
+    await expect(normalizeCodexEvent(raw("second"), ctx)).resolves.toMatchObject([{ seq: 4 }]);
+    expect(ctx.next_seq).toBe(5);
+  });
+
+  it("does not emit a Trace or advance sequence when a timed-out sink completes late", async () => {
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => { release = resolve; });
+    const sink: ArtifactSink = {
+      put: async () => {
+        await gate;
+        return { ref: `sha256:${"e".repeat(64)}` as const };
+      }
+    };
+    const ctx = context({
+      artifact_sink: sink,
+      artifact_sink_timeout_ms: 10,
+      max_inline_output_bytes: 4
+    });
+    const persisted: unknown[] = [];
+    const timedOut = normalizeCodexEvent({
+      type: "item.completed",
+      item: { id: "late", type: "command_execution", command: "late", aggregated_output: "large output", exit_code: 0 }
+    }, ctx).then((events) => { persisted.push(...events); });
+
+    await expect(timedOut).rejects.toMatchObject({ code: "NORMALIZER_ARTIFACT_TIMEOUT" });
+    expect(ctx.next_seq).toBe(4);
+    release();
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    expect(persisted).toEqual([]);
+    expect(ctx.next_seq).toBe(4);
+    await expect(normalizeCodexEvent({ type: "thread.started" }, ctx))
+      .resolves.toMatchObject([{ seq: 4 }]);
   });
 });

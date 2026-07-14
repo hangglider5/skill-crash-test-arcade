@@ -22,7 +22,8 @@ export interface PreflightCommandLimits {
 export type PreflightExecutor = (
   command: string,
   args: readonly string[],
-  limits: PreflightCommandLimits
+  limits: PreflightCommandLimits,
+  signal: AbortSignal
 ) => Promise<CommandResult>;
 
 export interface PreflightOptions {
@@ -43,10 +44,11 @@ function signalGroup(pid: number | undefined, signal: NodeJS.Signals): void {
   }
 }
 
-async function executeCommand(
+export async function executePreflightCommand(
   command: string,
   args: readonly string[],
-  limits: PreflightCommandLimits
+  limits: PreflightCommandLimits,
+  signal: AbortSignal
 ): Promise<CommandResult> {
   return new Promise((resolve, reject) => {
     const child = spawn(command, [...args], {
@@ -60,6 +62,7 @@ async function executeCommand(
     let stderrBytes = 0;
     let settled = false;
     let stopping = false;
+    let childClosed = false;
     let failure: Error | undefined;
     let killHandle: NodeJS.Timeout | undefined;
 
@@ -68,8 +71,15 @@ async function executeCommand(
       forceStop();
     }, limits.timeout_ms);
 
+    const abort = () => {
+      failure ??= new Error("preflight command aborted");
+      forceStop();
+    };
+    signal.addEventListener("abort", abort, { once: true });
+    if (signal.aborted) abort();
+
     function forceStop(): void {
-      if (stopping) return;
+      if (stopping || childClosed) return;
       stopping = true;
       try { signalGroup(child.pid, "SIGTERM"); } catch { /* close/error settles safely */ }
       killHandle = setTimeout(() => {
@@ -82,6 +92,7 @@ async function executeCommand(
       settled = true;
       clearTimeout(timeoutHandle);
       if (killHandle) clearTimeout(killHandle);
+      signal.removeEventListener("abort", abort);
       if (error) reject(error);
       else if (result) resolve(result);
       else reject(new Error("preflight command failed"));
@@ -106,6 +117,7 @@ async function executeCommand(
     child.stderr.on("data", (chunk: Buffer) => collect(chunk, stderr, "stderr"));
     child.once("error", () => finish(new Error("preflight command unavailable")));
     child.once("close", (code) => {
+      childClosed = true;
       if (failure) finish(failure);
       else finish(undefined, {
         exit_code: code ?? -1,
@@ -116,12 +128,34 @@ async function executeCommand(
   });
 }
 
-function withTimeout<T>(promise: Promise<T>, timeoutMs: number): Promise<T> {
+const EXECUTOR_FALLBACK_MARGIN_MS = 100;
+
+function withExecutorFallback<T>(
+  operation: (signal: AbortSignal) => Promise<T>,
+  timeoutMs: number
+): Promise<T> {
   return new Promise((resolve, reject) => {
-    const handle = setTimeout(() => reject(new Error("preflight executor timed out")), timeoutMs);
-    promise.then(
-      (value) => { clearTimeout(handle); resolve(value); },
-      () => { clearTimeout(handle); reject(new Error("preflight executor failed")); }
+    const controller = new AbortController();
+    let settled = false;
+    const handle = setTimeout(() => {
+      if (settled) return;
+      settled = true;
+      controller.abort();
+      reject(new Error("preflight executor timed out"));
+    }, timeoutMs);
+    Promise.resolve().then(() => operation(controller.signal)).then(
+      (value) => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(handle);
+        resolve(value);
+      },
+      () => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(handle);
+        reject(new Error("preflight executor failed"));
+      }
     );
   });
 }
@@ -132,9 +166,9 @@ async function boundedExecute(
   args: readonly string[],
   limits: PreflightCommandLimits
 ): Promise<CommandResult> {
-  const result = await withTimeout(
-    Promise.resolve().then(() => execute(command, args, limits)),
-    limits.timeout_ms
+  const result = await withExecutorFallback(
+    (signal) => execute(command, args, limits, signal),
+    limits.timeout_ms + limits.kill_grace_ms + EXECUTOR_FALLBACK_MARGIN_MS
   );
   if (Buffer.byteLength(result.stdout) > limits.max_stdout_bytes
     || Buffer.byteLength(result.stderr) > limits.max_stderr_bytes) {
@@ -181,7 +215,7 @@ function hasCanonicalLoginLine(output: string): boolean {
 }
 
 export async function runPreflight(options: PreflightOptions = {}): Promise<PreflightResult> {
-  const execute = options.execute ?? executeCommand;
+  const execute = options.execute ?? executePreflightCommand;
   const limits: PreflightCommandLimits = {
     timeout_ms: options.commandTimeoutMs ?? 5_000,
     max_stdout_bytes: options.maxStdoutBytes ?? 64 * 1024,

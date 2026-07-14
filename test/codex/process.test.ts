@@ -230,6 +230,55 @@ describe("CodexProcessRunner", () => {
     await new Promise((resolve) => setTimeout(resolve, 60));
   });
 
+  it("aborts a timed-out delivery and refuses its late commit without mutating persisted state", async () => {
+    const input = await fixture("one-event");
+    const persisted: unknown[] = [];
+    let abortObserved = false;
+    let lateCommitError: unknown;
+
+    await expect(runner(input, { callbackTimeoutMs: 10 }).run(input, async (event, delivery) => {
+      delivery.signal.addEventListener("abort", () => { abortObserved = true; }, { once: true });
+      await new Promise((resolve) => setTimeout(resolve, 40));
+      try {
+        delivery.commit(() => { persisted.push(event); });
+      } catch (error) {
+        lateCommitError = error;
+      }
+    })).rejects.toMatchObject({ code: "RUNNER_CALLBACK_TIMEOUT" });
+
+    await new Promise((resolve) => setTimeout(resolve, 60));
+    expect(abortObserved).toBe(true);
+    expect(lateCommitError).toMatchObject({ code: "RUNNER_CALLBACK_INACTIVE" });
+    expect(persisted).toEqual([]);
+  });
+
+  it("rejects an async commit function before it can mutate persisted state", async () => {
+    const input = await fixture("one-event");
+    const persisted: unknown[] = [];
+
+    await expect(runner(input).run(input, async (_event, delivery) => {
+      delivery.commit(async () => {
+        await Promise.resolve();
+        persisted.push("late");
+      });
+    })).rejects.toMatchObject({ code: "RUNNER_CALLBACK_COMMIT_ASYNC" });
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    expect(persisted).toEqual([]);
+  });
+
+  it("lets a cooperative callback observe cancellation while preserving the timeout error", async () => {
+    const input = await fixture("one-event");
+    let observed = false;
+
+    await expect(runner(input, { callbackTimeoutMs: 10 }).run(input, (_event, delivery) => new Promise<void>((resolve) => {
+      delivery.signal.addEventListener("abort", () => {
+        observed = true;
+        resolve();
+      }, { once: true });
+    }))).rejects.toMatchObject({ code: "RUNNER_CALLBACK_TIMEOUT" });
+    expect(observed).toBe(true);
+  });
+
   it("allows close during a bounded callback and settles once", async () => {
     const input = await fixture("one-event");
     let calls = 0;
@@ -239,6 +288,16 @@ describe("CodexProcessRunner", () => {
     });
     expect(result.exit_code).toBe(0);
     expect(calls).toBe(1);
+  });
+
+  it("commits synchronous callback state while the delivery is active", async () => {
+    const input = await fixture("one-event");
+    const persisted: unknown[] = [];
+    const result = await runner(input).run(input, async (event, delivery) => {
+      delivery.commit(() => { persisted.push(event); });
+    });
+    expect(result.exit_code).toBe(0);
+    expect(persisted).toMatchObject([{ type: "thread.started" }]);
   });
 
   it.each(["reject", "hang"] as const)("preserves invalid JSONL when its evidence sink %s", async (behavior) => {

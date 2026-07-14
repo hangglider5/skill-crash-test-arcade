@@ -4,6 +4,7 @@ import type { ArtifactRef } from "../protocol/index.js";
 
 import { readOwnedOutputFile, validateOwnedOutputPath } from "./output-file.js";
 import type {
+  AgentEventDelivery,
   AgentEventHandler,
   AgentRunInput,
   AgentRunResult,
@@ -21,6 +22,8 @@ export type RunnerErrorCode =
   | "RUNNER_STDOUT_TOO_LARGE"
   | "RUNNER_CALLBACK_TIMEOUT"
   | "RUNNER_CALLBACK_FAILED"
+  | "RUNNER_CALLBACK_INACTIVE"
+  | "RUNNER_CALLBACK_COMMIT_ASYNC"
   | "RUNNER_ARTIFACT_FAILED"
   | "RUNNER_EXIT_NONZERO"
   | "RUNNER_TIMEOUT"
@@ -117,19 +120,21 @@ function signalGroup(pid: number | undefined, signal: NodeJS.Signals): void {
 }
 
 function boundedHook<T>(
-  operation: () => T | Promise<T>,
+  operation: (signal: AbortSignal) => T | Promise<T>,
   timeoutMs: number,
   timeoutCode: RunnerErrorCode,
   failureCode: RunnerErrorCode
 ): Promise<T> {
   return new Promise((resolve, reject) => {
     let settled = false;
+    const controller = new AbortController();
     const handle = setTimeout(() => {
       if (settled) return;
       settled = true;
+      controller.abort();
       reject(new RunnerError(timeoutCode, "A runner callback exceeded its time limit"));
     }, timeoutMs);
-    Promise.resolve().then(operation).then(
+    Promise.resolve().then(() => operation(controller.signal)).then(
       (value) => {
         if (settled) return;
         settled = true;
@@ -139,8 +144,93 @@ function boundedHook<T>(
       () => {
         if (settled) return;
         settled = true;
+        controller.abort();
         clearTimeout(handle);
         reject(new RunnerError(failureCode, "A runner callback failed"));
+      }
+    );
+  });
+}
+
+function isAsyncFunction(operation: () => unknown): boolean {
+  return Object.prototype.toString.call(operation) === "[object AsyncFunction]";
+}
+
+function isPromiseLike(value: unknown): value is PromiseLike<unknown> {
+  return (typeof value === "object" && value !== null) || typeof value === "function"
+    ? typeof (value as { then?: unknown }).then === "function"
+    : false;
+}
+
+function deliverEvent(
+  handler: AgentEventHandler,
+  event: Record<string, unknown>,
+  timeoutMs: number
+): Promise<void> {
+  return new Promise((resolve, reject) => {
+    const controller = new AbortController();
+    let active = true;
+    let settled = false;
+    let timeoutHandle: NodeJS.Timeout;
+
+    const fail = (error: RunnerError) => {
+      if (settled) return;
+      settled = true;
+      active = false;
+      controller.abort();
+      clearTimeout(timeoutHandle);
+      reject(error);
+    };
+
+    const delivery: AgentEventDelivery = {
+      signal: controller.signal,
+      commit<T>(operation: () => T): T {
+        if (!active || controller.signal.aborted) {
+          throw new RunnerError(
+            "RUNNER_CALLBACK_INACTIVE",
+            "The event delivery is no longer active"
+          );
+        }
+        if (isAsyncFunction(operation)) {
+          const error = new RunnerError(
+            "RUNNER_CALLBACK_COMMIT_ASYNC",
+            "Event delivery commits must be synchronous"
+          );
+          fail(error);
+          throw error;
+        }
+
+        const value = operation();
+        if (isPromiseLike(value)) {
+          void Promise.resolve(value).catch(() => undefined);
+          const error = new RunnerError(
+            "RUNNER_CALLBACK_COMMIT_ASYNC",
+            "Event delivery commits must be synchronous"
+          );
+          fail(error);
+          throw error;
+        }
+        return value;
+      }
+    };
+
+    timeoutHandle = setTimeout(() => {
+      fail(new RunnerError(
+        "RUNNER_CALLBACK_TIMEOUT",
+        "A runner callback exceeded its time limit"
+      ));
+    }, timeoutMs);
+
+    Promise.resolve().then(() => handler(event, delivery)).then(
+      () => {
+        if (settled) return;
+        settled = true;
+        active = false;
+        clearTimeout(timeoutHandle);
+        resolve();
+      },
+      () => {
+        fail(new RunnerError("RUNNER_CALLBACK_FAILED", "A runner callback failed"));
       }
     );
   });
@@ -183,7 +273,7 @@ export class CodexProcessRunner implements AgentRunner {
     if (!this.#artifactSink) return undefined;
     try {
       const stored = await boundedHook(
-        () => this.#artifactSink!.put(data, { mime, redacted: false }),
+        (signal) => this.#artifactSink!.put(data, { mime, redacted: false }, { signal }),
         this.#callbackTimeoutMs,
         "RUNNER_CALLBACK_TIMEOUT",
         "RUNNER_ARTIFACT_FAILED"
@@ -307,12 +397,7 @@ export class CodexProcessRunner implements AgentRunner {
         work = work.then(async () => {
           if (primaryError) return;
           try {
-            await boundedHook(
-              () => onEvent(parsed as Record<string, unknown>),
-              this.#callbackTimeoutMs,
-              "RUNNER_CALLBACK_TIMEOUT",
-              "RUNNER_CALLBACK_FAILED"
-            );
+            await deliverEvent(onEvent, parsed as Record<string, unknown>, this.#callbackTimeoutMs);
           } catch (error) {
             recordFailure(error instanceof RunnerError
               ? error

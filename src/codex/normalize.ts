@@ -1,6 +1,21 @@
 import { TraceEventSchema, type TraceEvent } from "../protocol/index.js";
 import type { NormalizeContext } from "./types.js";
 
+export type NormalizerArtifactErrorCode =
+  | "NORMALIZER_ARTIFACT_REQUIRED"
+  | "NORMALIZER_ARTIFACT_REJECTED"
+  | "NORMALIZER_ARTIFACT_TIMEOUT";
+
+export class NormalizerArtifactError extends Error {
+  readonly code: NormalizerArtifactErrorCode;
+
+  constructor(code: NormalizerArtifactErrorCode, message: string) {
+    super(message);
+    this.name = "NormalizerArtifactError";
+    this.code = code;
+  }
+}
+
 function record(value: unknown): Record<string, unknown> | undefined {
   return typeof value === "object" && value !== null && !Array.isArray(value)
     ? value as Record<string, unknown>
@@ -110,6 +125,57 @@ function buildEvent(
   return event;
 }
 
+async function storeArtifact(
+  output: string,
+  context: NormalizeContext
+): Promise<TraceEvent["artifacts"][number]> {
+  const sink = context.artifact_sink;
+  if (!sink) {
+    throw new NormalizerArtifactError(
+      "NORMALIZER_ARTIFACT_REQUIRED",
+      "An artifact sink is required for oversized command output"
+    );
+  }
+
+  const timeoutMs = context.artifact_sink_timeout_ms ?? 5_000;
+  const controller = new AbortController();
+  return new Promise((resolve, reject) => {
+    let settled = false;
+    const finishReject = (error: NormalizerArtifactError) => {
+      if (settled) return;
+      settled = true;
+      controller.abort();
+      clearTimeout(timeoutHandle);
+      reject(error);
+    };
+    const timeoutHandle = setTimeout(() => {
+      finishReject(new NormalizerArtifactError(
+        "NORMALIZER_ARTIFACT_TIMEOUT",
+        "The artifact sink exceeded its time limit"
+      ));
+    }, Math.max(0, timeoutMs));
+
+    Promise.resolve().then(() => sink.put(
+      Buffer.from(output),
+      { mime: "text/plain; charset=utf-8", redacted: false },
+      { signal: controller.signal }
+    )).then(
+      (stored) => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timeoutHandle);
+        resolve(stored.ref);
+      },
+      () => {
+        finishReject(new NormalizerArtifactError(
+          "NORMALIZER_ARTIFACT_REJECTED",
+          "The artifact sink rejected the command output"
+        ));
+      }
+    );
+  });
+}
+
 const contextQueues = new WeakMap<NormalizeContext, Promise<void>>();
 
 async function normalizeOne(
@@ -148,14 +214,13 @@ async function normalizeOne(
     const inlineLimit = context.max_inline_output_bytes ?? 16 * 1024;
     if (output !== undefined) {
       if (Buffer.byteLength(output) > inlineLimit && !context.artifact_sink) {
-        throw new Error("An artifact sink is required for oversized command output");
+        throw new NormalizerArtifactError(
+          "NORMALIZER_ARTIFACT_REQUIRED",
+          "An artifact sink is required for oversized command output"
+        );
       }
       if (Buffer.byteLength(output) > inlineLimit && context.artifact_sink) {
-        const stored = await context.artifact_sink.put(Buffer.from(output), {
-          mime: "text/plain; charset=utf-8",
-          redacted: false
-        });
-        artifacts.push(stored.ref);
+        artifacts.push(await storeArtifact(output, context));
       } else {
         data.aggregated_output = output;
       }
