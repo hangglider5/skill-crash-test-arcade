@@ -589,6 +589,27 @@ describe("ImportLobby", () => {
     expect(onRunStarted).not.toHaveBeenCalled();
   });
 
+  it("does not report a superseded API run after the lobby later unmounts", async () => {
+    const pendingRun = deferred<RunEnvelope>();
+    const oldApi = fakeApi();
+    vi.mocked(oldApi.startRun).mockReturnValueOnce(pendingRun.promise);
+    const newApi = fakeApi({ manifests: [falseGreenSummary()] });
+    const onRunStarted = vi.fn<(runId: string) => void>();
+    const user = userEvent.setup();
+    const { rerender, unmount } = render(
+      <ImportLobby api={oldApi} onRunStarted={onRunStarted} />
+    );
+    await inspectGit(user);
+    await user.click(screen.getByRole("button", { name: "Start Crash Test" }));
+
+    rerender(<ImportLobby api={newApi} onRunStarted={onRunStarted} />);
+    expect(await screen.findByText("False Green")).toBeVisible();
+    unmount();
+    await act(async () => pendingRun.resolve(createdRun()));
+
+    expect(onRunStarted).not.toHaveBeenCalled();
+  });
+
   it("renders independent safe preflight and manifest failure states in their panels", async () => {
     const api = fakeApi();
     vi.mocked(api.health).mockRejectedValueOnce(new Error("health secret"));

@@ -212,7 +212,9 @@ export function ImportLobby({ api, onRunStarted }: ImportLobbyProps): React.JSX.
   const stateGenerationRef = useRef(0);
   const prefetchSequenceRef = useRef(0);
   const busyRef = useRef(false);
+  const latestApiRef = useRef(api);
   const tabRefs = useRef<Array<HTMLButtonElement | null>>([]);
+  latestApiRef.current = api;
 
   useEffect(() => {
     mountedRef.current = true;
@@ -394,11 +396,12 @@ export function ImportLobby({ api, onRunStarted }: ImportLobbyProps): React.JSX.
     if (busyRef.current || !canStart || snapshot === null || manifest === null) return;
     busyRef.current = true;
     const generation = stateGenerationRef.current;
+    const runApi = api;
     setBusy("start");
     setError(null);
     let createdRunId: string | null = null;
     try {
-      const run = await api.startRun(manifest.id, snapshot.source_hash);
+      const run = await runApi.startRun(manifest.id, snapshot.source_hash);
       createdRunId = run.run_id;
     } catch {
       if (mountedRef.current && stateGenerationRef.current === generation) {
@@ -410,8 +413,7 @@ export function ImportLobby({ api, onRunStarted }: ImportLobbyProps): React.JSX.
         setBusy(null);
       }
     }
-    if (createdRunId !== null
-      && (!mountedRef.current || stateGenerationRef.current === generation)) {
+    if (createdRunId !== null && latestApiRef.current === runApi) {
       onRunStarted(createdRunId);
     }
   }
