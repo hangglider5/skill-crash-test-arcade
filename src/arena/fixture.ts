@@ -176,12 +176,35 @@ export async function auditFixtureFilesystem(
 
   const actualInventory = await captureInventory(canonicalWorkspace);
   const allowedPaths = new Set(baseline.allowed_paths);
+  const invalidAllowedPaths = new Set((await Promise.all(
+    [...allowedPaths].map(async (relativePath) => {
+      const expected = authority.inventory[relativePath];
+      if (expected?.type !== "file") {
+        throw invalidBaseline(`Allowed baseline path is not a regular file: ${relativePath}`);
+      }
+      const actual = actualInventory[relativePath];
+      let actualRealpath: string | null = null;
+      try {
+        actualRealpath = await realpath(
+          path.join(canonicalWorkspace, ...relativePath.split("/"))
+        );
+      } catch {
+        // Missing and dangling allowed paths fail scope below.
+      }
+      return actual?.type !== "file"
+        || actual.mode !== expected.mode
+        || actualRealpath === null
+        || !isWithin(canonicalWorkspace, actualRealpath)
+        ? relativePath
+        : null;
+    })
+  )).filter((relativePath): relativePath is string => relativePath !== null));
   const allPaths = new Set([
     ...Object.keys(authority.inventory),
     ...Object.keys(actualInventory)
   ]);
   const outOfScopePaths = [...allPaths].filter((relativePath) => {
-    if (allowedPaths.has(relativePath)) {
+    if (allowedPaths.has(relativePath) && !invalidAllowedPaths.has(relativePath)) {
       return false;
     }
     return canonicalJson(authority.inventory[relativePath] ?? null)
@@ -357,6 +380,16 @@ export async function materializeFixture(
   });
   const canonicalWorkspace = await realpath(destination);
   const inventory = Object.freeze(await captureInventory(canonicalWorkspace));
+  for (const allowedPath of baseline.allowed_paths) {
+    const allowedEntry = inventory[allowedPath];
+    if (allowedEntry?.type !== "file") {
+      throw new Error(`Allowed fixture path must be a regular file: ${allowedPath}`);
+    }
+    const canonicalAllowedPath = await realpath(path.join(destination, allowedPath));
+    if (!isWithin(canonicalWorkspace, canonicalAllowedPath)) {
+      throw new Error(`Allowed fixture path escapes workspace: ${allowedPath}`);
+    }
+  }
   for (const protectedPath of protectedPathSet) {
     const protectedEntry = inventory[protectedPath];
     if (protectedEntry?.type !== "file") {
