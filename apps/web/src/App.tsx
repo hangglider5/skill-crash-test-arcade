@@ -1,13 +1,14 @@
 import { useLayoutEffect, useState } from "react";
 
 import { ArenaApi } from "./api.js";
+import { ImportLobby } from "./components/ImportLobby.js";
 
 type Screen = "import" | "run" | "compare";
 
 const screenContent: Record<Screen, { readonly title: string; readonly detail: string }> = {
   import: {
     title: "Import a Skill",
-    detail: "Choose a local skill source to begin a private loopback run."
+    detail: "Inspect a Skill before starting a private loopback run."
   },
   run: {
     title: "Run Monitor",
@@ -35,6 +36,7 @@ export function App(): React.JSX.Element {
     ? null
     : new ArenaApi(sessionToken.value));
   const [screen, setScreen] = useState<Screen>("import");
+  const [runId, setRunId] = useState<string | null>(null);
 
   useLayoutEffect(() => {
     if (!sessionToken.present) return;
@@ -54,6 +56,11 @@ export function App(): React.JSX.Element {
         <p role="alert">Open Arena from the local startup URL</p>
       </main>
     );
+  }
+
+  function handleRunStarted(nextRunId: string): void {
+    setRunId(nextRunId);
+    setScreen("run");
   }
 
   return (
@@ -77,14 +84,19 @@ export function App(): React.JSX.Element {
           ))}
         </nav>
       </header>
-      <div className="shell-content">
-        <section aria-labelledby="screen-title" aria-live="polite" className="panel placeholder-panel">
-          <span className="section-index" aria-hidden="true">0{screen === "import" ? 1 : screen === "run" ? 2 : 3}</span>
-          <div>
-            <h1 id="screen-title">{screenContent[screen].title}</h1>
-            <p>{screenContent[screen].detail}</p>
-          </div>
-        </section>
+      <div className={screen === "import" ? "shell-content shell-content-wide" : "shell-content"}>
+        {screen === "import" ? (
+          <ImportLobby api={api} onRunStarted={handleRunStarted} />
+        ) : (
+          <section aria-labelledby="screen-title" aria-live="polite" className="panel placeholder-panel">
+            <span className="section-index" aria-hidden="true">0{screen === "run" ? 2 : 3}</span>
+            <div>
+              <h1 id="screen-title">{screenContent[screen].title}</h1>
+              <p>{screenContent[screen].detail}</p>
+              {screen === "run" && runId !== null ? <code className="run-id">{runId}</code> : null}
+            </div>
+          </section>
+        )}
       </div>
     </main>
   );

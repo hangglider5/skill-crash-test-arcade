@@ -1,12 +1,96 @@
 import { StrictMode } from "react";
 import { fireEvent, render, screen } from "@testing-library/react";
+import { userEvent } from "@testing-library/user-event";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { App } from "../../apps/web/src/App.js";
-import { ApiError, ArenaApi } from "../../apps/web/src/api.js";
+import {
+  ApiError,
+  ArenaApi,
+  type PreflightResult,
+  type ReplayManifest
+} from "../../apps/web/src/api.js";
+import type {
+  RunEnvelope,
+  SkillContract,
+  SkillSnapshot
+} from "../../src/protocol/schema.js";
 
 const hash = "a".repeat(64);
 const hashB = "b".repeat(64);
+
+function lobbyHealth(): PreflightResult {
+  return {
+    ok: true,
+    checks: [
+      { id: "codex-version", ok: true, message: "ready" },
+      { id: "codex-login", ok: true, message: "ready" },
+      { id: "git-version", ok: true, message: "ready" },
+      { id: "app-data", ok: true, message: "ready" }
+    ],
+    model: { target: "gpt-5.6", status: "configured-unverified" }
+  };
+}
+
+function lobbyManifest(): ReplayManifest {
+  return {
+    schema: "arena.replay-manifest/v1",
+    id: "repo-dirty-tree-v1",
+    name: "Dirty Tree",
+    fixture: { id: "repo-bugfix", version: 1 },
+    fault_cards: [{ id: "dirty-tree", version: 1 }],
+    budgets: { wall_time_s: 180, max_command_retries: 2 },
+    scoring: { weights: { task_correctness: 1 }, hard_gates: ["preserve"] }
+  };
+}
+
+function lobbySnapshot(): SkillSnapshot {
+  return {
+    schema: "arena.skill-snapshot/v1",
+    source: { kind: "git", uri: "https://github.com/example/skill", revision: "main" },
+    entrypoint: "SKILL.md",
+    license: "MIT",
+    files: [{ path: "SKILL.md", bytes: 8, sha256: hash }],
+    source_hash: hash,
+    imported_path: "/private/imports/redacted"
+  };
+}
+
+function lobbyContract(): SkillContract {
+  return {
+    schema: "arena.skill-contract/v1",
+    snapshot_hash: hash,
+    model: "gpt-5.6",
+    promises: [],
+    preconditions: [],
+    expected_artifacts: [],
+    recovery_rules: [],
+    risk_signals: []
+  };
+}
+
+function lobbyRun(): RunEnvelope {
+  return {
+    schema: "arena.run/v1",
+    run_id: "run_app_01",
+    run_group_id: "group_app_01",
+    trial_index: 0,
+    manifest_hash: hash,
+    snapshot_hash: hash,
+    fixture_hash: hash,
+    runner: { adapter: "codex-cli", model: "gpt-5.6" },
+    state: "created",
+    started_at: "2026-07-15T00:00:00.000Z"
+  };
+}
+
+function stubLobbyApi(): void {
+  vi.spyOn(ArenaApi.prototype, "health").mockResolvedValue(lobbyHealth());
+  vi.spyOn(ArenaApi.prototype, "listManifests").mockResolvedValue([lobbyManifest()]);
+  vi.spyOn(ArenaApi.prototype, "importSkill").mockResolvedValue(lobbySnapshot());
+  vi.spyOn(ArenaApi.prototype, "compileContract").mockResolvedValue(lobbyContract());
+  vi.spyOn(ArenaApi.prototype, "startRun").mockResolvedValue(lobbyRun());
+}
 
 function runRecord(): Record<string, unknown> {
   return {
@@ -152,6 +236,24 @@ describe("App", () => {
     expect(screen.getByRole("heading", { name: "Compare Verdicts" })).toBeVisible();
     fireEvent.click(screen.getByRole("button", { name: "Import" }));
     expect(screen.getByRole("heading", { name: "Import a Skill" })).toBeVisible();
+  });
+
+  it("switches from the real import lobby to the run screen with its run id", async () => {
+    stubLobbyApi();
+    const user = userEvent.setup();
+    window.history.replaceState({}, "", "/?token=arena-secret");
+    render(<App />);
+
+    await user.type(
+      screen.getByRole("textbox", { name: "GitHub URL" }),
+      "https://github.com/example/skill"
+    );
+    await user.click(screen.getByRole("button", { name: "Inspect source" }));
+    await screen.findByText("LOCKED");
+    await user.click(screen.getByRole("button", { name: "Start Crash Test" }));
+
+    expect(await screen.findByRole("heading", { name: "Run Monitor" })).toBeVisible();
+    expect(screen.getByText("run_app_01")).toBeVisible();
   });
 });
 
