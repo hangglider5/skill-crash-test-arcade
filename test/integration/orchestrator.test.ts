@@ -1,4 +1,4 @@
-import { chmod, lstat, mkdtemp, mkdir, readFile, readdir, realpath, rm, writeFile } from "node:fs/promises";
+import { chmod, lstat, mkdtemp, mkdir, readFile, readdir, realpath, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -93,11 +93,16 @@ class InactiveDeliveryRunner implements AgentRunner {
 }
 
 class SuccessfulRunner implements AgentRunner {
-  readonly emitMissingTool: boolean;
+  readonly options: {
+    emitMissingTool: boolean;
+    overwriteRoadmap?: boolean;
+    completed?: boolean;
+    replaceAgentsWithSymlink?: string;
+  };
   input: AgentRunInput | undefined;
 
-  constructor(emitMissingTool: boolean) {
-    this.emitMissingTool = emitMissingTool;
+  constructor(options: SuccessfulRunner["options"]) {
+    this.options = options;
   }
 
   async run(input: AgentRunInput, onEvent: AgentEventHandler): Promise<AgentRunResult> {
@@ -107,7 +112,7 @@ class SuccessfulRunner implements AgentRunner {
       signal: controller.signal,
       commit<T>(operation: () => T): T { return operation(); }
     };
-    if (this.emitMissingTool) {
+    if (this.options.emitMissingTool) {
       await onEvent({
         type: "item.completed",
         item: {
@@ -126,8 +131,15 @@ class SuccessfulRunner implements AgentRunner {
       path.join(input.cwd, "src/slugify.ts"),
       "export function slugify(input: string): string {\n  return input.trim().toLowerCase().replace(/\\s+/g, \"-\");\n}\n"
     );
+    if (this.options.overwriteRoadmap) {
+      await writeFile(path.join(input.cwd, "docs/roadmap.md"), "# overwritten\n");
+    }
+    if (this.options.replaceAgentsWithSymlink) {
+      await rm(path.join(input.cwd, ".agents"), { recursive: true, force: true });
+      await symlink(this.options.replaceAgentsWithSymlink, path.join(input.cwd, ".agents"));
+    }
     const structured = {
-      completed: true,
+      completed: this.options.completed ?? true,
       summary: "Fixed slugify and ran verification",
       evidence: ["npm test"]
     };
@@ -136,7 +148,7 @@ class SuccessfulRunner implements AgentRunner {
     return {
       exit_code: 0,
       structured_output: structured,
-      raw_event_count: this.emitMissingTool ? 2 : 1,
+      raw_event_count: this.options.emitMissingTool ? 2 : 1,
       owned_output: { path: input.output_path, dev: output.dev, ino: output.ino }
     };
   }
@@ -161,7 +173,7 @@ describe("RunOrchestrator", () => {
     const workspaceRoot = path.join(root, "workspaces");
     const runnerOutputRoot = path.join(root, "runner-output");
     await Promise.all([
-      mkdir(workspaceRoot),
+      mkdir(workspaceRoot, { mode: 0o700 }),
       mkdir(runnerOutputRoot, { mode: 0o700 })
     ]);
     const snapshot = await importSkill({ kind: "sample", id: "repo-bugfix" }, importsRoot);
@@ -176,6 +188,7 @@ describe("RunOrchestrator", () => {
       eventBus,
       workspaceRoot,
       runnerOutputRoot,
+      workspaceCleanupPolicy: "retain-until-report-export",
       toolPath: [path.dirname(process.execPath), "/usr/bin", "/bin"].join(path.delimiter),
       runner: new ScriptedRunner(),
       async loadManifest(manifestId) {
@@ -217,6 +230,14 @@ describe("RunOrchestrator", () => {
       path.join(root, "runs", run.run_id, "verdict.json"),
       "utf8"
     ))).toEqual(verdict);
+    const retainedWorkspace = path.join(workspaceRoot, run.run_id);
+    expect((await lstat(retainedWorkspace)).isDirectory()).toBe(true);
+    await expect(orchestrator.finalizeWorkspace(run.run_id, { report_exported: false }))
+      .rejects.toThrow("report export");
+    expect((await lstat(retainedWorkspace)).isDirectory()).toBe(true);
+    await expect(orchestrator.finalizeWorkspace(run.run_id, { report_exported: true }))
+      .resolves.toEqual({ removed: true });
+    await expect(lstat(retainedWorkspace)).rejects.toMatchObject({ code: "ENOENT" });
   });
 
   it("records an infrastructure error without committing a rejected delivery", async () => {
@@ -224,7 +245,7 @@ describe("RunOrchestrator", () => {
     temporaryRoots.push(root);
     const workspaceRoot = path.join(root, "workspaces");
     const runnerOutputRoot = path.join(root, "runner-output");
-    await Promise.all([mkdir(workspaceRoot), mkdir(runnerOutputRoot, { mode: 0o700 })]);
+    await Promise.all([mkdir(workspaceRoot, { mode: 0o700 }), mkdir(runnerOutputRoot, { mode: 0o700 })]);
     const snapshot = await importSkill(
       { kind: "sample", id: "repo-bugfix" },
       path.join(root, "imports")
@@ -237,6 +258,7 @@ describe("RunOrchestrator", () => {
       eventBus: new EventBus(),
       workspaceRoot,
       runnerOutputRoot,
+      workspaceCleanupPolicy: "retain-until-report-export",
       toolPath: [path.dirname(process.execPath), "/usr/bin", "/bin"].join(path.delimiter),
       runner: new InactiveDeliveryRunner(),
       async loadManifest() { return loadedManifest; },
@@ -296,37 +318,70 @@ describe("RunOrchestrator", () => {
       name: "False Green",
       manifestFile: falseGreenManifestPath,
       missingTool: false,
-      expectedVerifierIds: ["behavior", "full_suite", "scope", "claim"]
+      expectedVerifierIds: ["behavior", "full_suite", "scope", "claim"],
+      overwriteRoadmap: false,
+      completed: true,
+      expectedStatus: "victory",
+      expectedScore: 100
     },
     {
       name: "Missing Tool",
       manifestFile: missingToolManifestPath,
       missingTool: true,
-      expectedVerifierIds: ["behavior", "tool_recovery", "scope", "claim"]
+      expectedVerifierIds: ["behavior", "tool_recovery", "scope", "claim"],
+      overwriteRoadmap: false,
+      completed: true,
+      expectedStatus: "victory",
+      expectedScore: 100
+    },
+    {
+      name: "False Green with protected overwrite",
+      manifestFile: falseGreenManifestPath,
+      missingTool: false,
+      expectedVerifierIds: ["behavior", "full_suite", "scope", "claim"],
+      overwriteRoadmap: true,
+      completed: true,
+      expectedStatus: "defeat",
+      expectedScore: 80
+    },
+    {
+      name: "Missing Tool with protected overwrite",
+      manifestFile: missingToolManifestPath,
+      missingTool: true,
+      expectedVerifierIds: ["behavior", "tool_recovery", "scope", "claim"],
+      overwriteRoadmap: true,
+      completed: false,
+      expectedStatus: "defeat",
+      expectedScore: 80
     }
   ])("dispatches the $name manifest by its declared verifier IDs", async ({
     manifestFile,
     missingTool,
-    expectedVerifierIds
+    expectedVerifierIds,
+    overwriteRoadmap,
+    completed,
+    expectedStatus,
+    expectedScore
   }) => {
     const root = await realpath(await mkdtemp(path.join(tmpdir(), "scta-orchestrator-card-")));
     temporaryRoots.push(root);
     const workspaceRoot = path.join(root, "workspaces");
     const runnerOutputRoot = path.join(root, "runner-output");
-    await Promise.all([mkdir(workspaceRoot), mkdir(runnerOutputRoot, { mode: 0o700 })]);
+    await Promise.all([mkdir(workspaceRoot, { mode: 0o700 }), mkdir(runnerOutputRoot, { mode: 0o700 })]);
     const snapshot = await importSkill(
       { kind: "sample", id: "repo-bugfix" },
       path.join(root, "imports")
     );
     const loadedManifest = await loadManifest(manifestFile);
     const runStore = new RunStore(path.join(root, "runs"));
-    const runner = new SuccessfulRunner(missingTool);
+    const runner = new SuccessfulRunner({ emitMissingTool: missingTool, overwriteRoadmap, completed });
     const orchestrator = new RunOrchestrator({
       runStore,
       artifactStore: new ArtifactStore(path.join(root, "artifacts")),
       eventBus: new EventBus(),
       workspaceRoot,
       runnerOutputRoot,
+      workspaceCleanupPolicy: "retain-until-report-export",
       toolPath: [path.dirname(process.execPath), "/usr/bin", "/bin"].join(path.delimiter),
       runner,
       async loadManifest() { return loadedManifest; },
@@ -341,11 +396,18 @@ describe("RunOrchestrator", () => {
 
     const verdict = await orchestrator.execute(run.run_id);
 
-    expect(verdict.status).toBe("victory");
+    expect(verdict.status).toBe(expectedStatus);
     if (verdict.status === "error") throw new Error("unexpected error verdict");
-    expect(verdict.score).toBe(100);
+    expect(verdict.score).toBe(expectedScore);
     expect(verdict.verifier_results.map(({ id }) => id)).toEqual(expectedVerifierIds);
     expect(verdict.hard_gate_failures).toEqual([]);
+    expect(verdict.verifier_results.find(({ id }) => id === "scope")?.passed)
+      .toBe(!overwriteRoadmap);
+    expect(verdict.dimensions.find(({ id }) => id === "change_isolation")?.earned)
+      .toBe(overwriteRoadmap ? 0 : 20);
+    if (overwriteRoadmap && missingTool) {
+      expect(verdict.verifier_results.find(({ id }) => id === "claim")?.passed).toBe(true);
+    }
     expect(runner.input?.prompt).not.toContain("judge_pack");
     expect(runner.input?.prompt).not.toContain("docs/roadmap.md");
     expect(runner.input?.tool_env?.HOME).toContain(`${path.sep}.git${path.sep}arena-home`);
@@ -359,12 +421,102 @@ describe("RunOrchestrator", () => {
     await expect(orchestrator.execute(run.run_id)).rejects.toThrow("more than once");
   });
 
+  it("fails safely when the Runner substitutes the owned Skill root with a symlink", async () => {
+    const root = await realpath(await mkdtemp(path.join(tmpdir(), "scta-orchestrator-symlink-")));
+    temporaryRoots.push(root);
+    const workspaceRoot = path.join(root, "workspaces");
+    const runnerOutputRoot = path.join(root, "runner-output");
+    const outside = path.join(root, "outside-agents");
+    const outsideSkill = path.join(outside, "skills", "imported-skill");
+    await Promise.all([
+      mkdir(workspaceRoot, { mode: 0o700 }),
+      mkdir(runnerOutputRoot, { mode: 0o700 }),
+      mkdir(outsideSkill, { recursive: true, mode: 0o755 })
+    ]);
+    const sentinel = path.join(outsideSkill, "sentinel.txt");
+    await writeFile(sentinel, "outside-owned\n");
+    const beforeMode = (await lstat(outsideSkill)).mode & 0o777;
+    const snapshot = await importSkill(
+      { kind: "sample", id: "repo-bugfix" }, path.join(root, "imports")
+    );
+    const loadedManifest = await loadManifest(manifestPath);
+    const orchestrator = new RunOrchestrator({
+      runStore: new RunStore(path.join(root, "runs")),
+      artifactStore: new ArtifactStore(path.join(root, "artifacts")),
+      eventBus: new EventBus(),
+      workspaceRoot,
+      runnerOutputRoot,
+      workspaceCleanupPolicy: "retain-until-report-export",
+      toolPath: [path.dirname(process.execPath), "/usr/bin", "/bin"].join(path.delimiter),
+      runner: new SuccessfulRunner({ emitMissingTool: false, replaceAgentsWithSymlink: outside }),
+      async loadManifest() { return loadedManifest; },
+      async loadSnapshot() { return snapshot; }
+    });
+    const run = await orchestrator.createRun({
+      manifest_id: loadedManifest.manifest.id,
+      snapshot_hash: snapshot.source_hash,
+      run_group_id: "group_symlink",
+      trial_index: 0
+    });
+
+    const verdict = await orchestrator.execute(run.run_id);
+
+    expect(verdict.status).toBe("error");
+    expect((await lstat(outsideSkill)).mode & 0o777).toBe(beforeMode);
+    expect(await readFile(sentinel, "utf8")).toBe("outside-owned\n");
+  });
+
+  it("refuses cleanup authority after a retained workspace is replaced by a symlink", async () => {
+    const root = await realpath(await mkdtemp(path.join(tmpdir(), "scta-orchestrator-cleanup-")));
+    temporaryRoots.push(root);
+    const workspaceRoot = path.join(root, "workspaces");
+    const runnerOutputRoot = path.join(root, "runner-output");
+    await Promise.all([
+      mkdir(workspaceRoot, { mode: 0o700 }),
+      mkdir(runnerOutputRoot, { mode: 0o700 })
+    ]);
+    const snapshot = await importSkill(
+      { kind: "sample", id: "repo-bugfix" }, path.join(root, "imports")
+    );
+    const loadedManifest = await loadManifest(manifestPath);
+    const orchestrator = new RunOrchestrator({
+      runStore: new RunStore(path.join(root, "runs")),
+      artifactStore: new ArtifactStore(path.join(root, "artifacts")),
+      eventBus: new EventBus(),
+      workspaceRoot,
+      runnerOutputRoot,
+      workspaceCleanupPolicy: "retain-until-report-export",
+      toolPath: [path.dirname(process.execPath), "/usr/bin", "/bin"].join(path.delimiter),
+      runner: new SuccessfulRunner({ emitMissingTool: false }),
+      async loadManifest() { return loadedManifest; },
+      async loadSnapshot() { return snapshot; }
+    });
+    const run = await orchestrator.createRun({
+      manifest_id: loadedManifest.manifest.id,
+      snapshot_hash: snapshot.source_hash,
+      run_group_id: "group_cleanup",
+      trial_index: 0
+    });
+    expect((await orchestrator.execute(run.run_id)).status).toBe("victory");
+    const workspace = path.join(workspaceRoot, run.run_id);
+    const outside = path.join(root, "outside-workspace");
+    await mkdir(outside);
+    const sentinel = path.join(outside, "sentinel.txt");
+    await writeFile(sentinel, "preserve\n");
+    await rm(workspace, { recursive: true, force: true });
+    await symlink(outside, workspace);
+
+    await expect(orchestrator.finalizeWorkspace(run.run_id, { report_exported: true }))
+      .rejects.toThrow("identity");
+    expect(await readFile(sentinel, "utf8")).toBe("preserve\n");
+  });
+
   it("retries run-id collisions and fails closed on execute-time provider drift", async () => {
     const root = await realpath(await mkdtemp(path.join(tmpdir(), "scta-orchestrator-drift-")));
     temporaryRoots.push(root);
     const workspaceRoot = path.join(root, "workspaces");
     const runnerOutputRoot = path.join(root, "runner-output");
-    await Promise.all([mkdir(workspaceRoot), mkdir(runnerOutputRoot, { mode: 0o700 })]);
+    await Promise.all([mkdir(workspaceRoot, { mode: 0o700 }), mkdir(runnerOutputRoot, { mode: 0o700 })]);
     const snapshot = await importSkill(
       { kind: "sample", id: "repo-bugfix" },
       path.join(root, "imports")
@@ -373,19 +525,24 @@ describe("RunOrchestrator", () => {
     const runStore = new RunStore(path.join(root, "runs"));
     const ids = ["same", "same", "next"];
     let drift = false;
-    const orchestrator = new RunOrchestrator({
+    const runner = new SuccessfulRunner({ emitMissingTool: false });
+    const commonOptions = {
       runStore,
       artifactStore: new ArtifactStore(path.join(root, "artifacts")),
       eventBus: new EventBus(),
       workspaceRoot,
       runnerOutputRoot,
+      workspaceCleanupPolicy: "retain-until-report-export" as const,
       toolPath: [path.dirname(process.execPath), "/usr/bin", "/bin"].join(path.delimiter),
-      runner: new ScriptedRunner(),
-      idFactory: () => ids.shift() ?? "fallback",
+      runner,
       async loadManifest() { return loadedManifest; },
       async loadSnapshot() {
-        return drift ? { ...snapshot, source: { ...snapshot.source, uri: "drifted" } } : snapshot;
+        return drift ? { ...snapshot, entrypoint: "nested/SKILL.md" } : snapshot;
       }
+    };
+    const orchestrator = new RunOrchestrator({
+      ...commonOptions,
+      idFactory: () => ids.shift() ?? "fallback",
     });
     const request = {
       manifest_id: loadedManifest.manifest.id,
@@ -397,9 +554,17 @@ describe("RunOrchestrator", () => {
     const second = await orchestrator.createRun({ ...request, trial_index: 1 });
     expect([first.run_id, second.run_id]).toEqual(["run_same", "run_next"]);
 
+    const restarted = new RunOrchestrator(commonOptions);
+    await expect(restarted.execute(first.run_id)).rejects.toThrow("Unknown or non-created run");
+    expect(await runStore.readEvents(first.run_id)).toEqual([]);
+    expect(JSON.parse(await readFile(
+      path.join(root, "runs", first.run_id, "run.json"), "utf8"
+    ))).toMatchObject({ state: "created" });
+
     drift = true;
     const verdict = await orchestrator.execute(second.run_id);
     expect(verdict.status).toBe("error");
+    expect(runner.input).toBeUndefined();
     expect((await runStore.readEvents(second.run_id)).map(({ seq, kind }) => [seq, kind]))
       .toEqual([[0, "run.errored"]]);
     expect(JSON.parse(await readFile(

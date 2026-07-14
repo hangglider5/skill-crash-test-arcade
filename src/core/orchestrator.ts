@@ -1,12 +1,14 @@
 import { randomUUID } from "node:crypto";
 import { constants } from "node:fs";
 import {
-  chmod,
   lstat,
   mkdir,
   open,
+  readdir,
   realpath,
   rm,
+  rmdir,
+  unlink,
   writeFile
 } from "node:fs/promises";
 import path from "node:path";
@@ -56,6 +58,7 @@ export interface RunOrchestratorOptions {
   readonly eventBus: EventBus;
   readonly workspaceRoot: string;
   readonly runnerOutputRoot: string;
+  readonly workspaceCleanupPolicy: "retain-until-report-export";
   readonly runner: AgentRunner;
   readonly loadManifest: (manifestId: string) => Promise<LoadedManifest>;
   readonly loadSnapshot: (snapshotHash: string) => Promise<SkillSnapshot>;
@@ -68,8 +71,25 @@ export interface RunOrchestratorOptions {
 interface RunContext {
   envelope: RunEnvelope;
   manifestId: string;
-  workspace?: string;
+  snapshotExecutionFingerprint: string;
+  workspace?: OwnedDirectory;
+  workspaceCleaned?: boolean;
 }
+
+interface OwnedDirectory {
+  readonly parent: string;
+  readonly path: string;
+  readonly dev: number;
+  readonly ino: number;
+}
+
+/**
+ * MVP recovery is deliberately process-lifetime only. Created-run execution
+ * contexts and retained-workspace cleanup authority are not reconstructed from
+ * RunStore after restart; a fresh orchestrator fails closed until a future,
+ * explicit recovery protocol is implemented.
+ */
+export const ORCHESTRATOR_RECOVERY_POLICY = "process-lifetime-only" as const;
 
 function isWithin(root: string, candidate: string): boolean {
   const relative = path.relative(root, candidate);
@@ -87,17 +107,6 @@ function portableParts(value: string): string[] {
   return parts;
 }
 
-async function canonicalDirectory(configured: string): Promise<string> {
-  const absolute = path.resolve(configured);
-  await mkdir(absolute, { recursive: true });
-  const stats = await lstat(absolute);
-  const canonical = await realpath(absolute);
-  if (!stats.isDirectory() || stats.isSymbolicLink() || canonical !== absolute) {
-    throw new Error("Configured arena directory is not canonical");
-  }
-  return canonical;
-}
-
 async function privateCanonicalDirectory(configured: string): Promise<string> {
   const absolute = path.resolve(configured);
   await mkdir(absolute, { recursive: true, mode: 0o700 });
@@ -111,6 +120,50 @@ async function privateCanonicalDirectory(configured: string): Promise<string> {
     throw new Error("Runner output root must be a private current-user directory");
   }
   return canonical;
+}
+
+async function captureOwnedDirectory(parent: string, candidate: string): Promise<OwnedDirectory> {
+  if (path.dirname(candidate) !== parent || path.resolve(candidate) !== candidate) {
+    throw new Error("Owned directory must be a direct contained child");
+  }
+  const stats = await lstat(candidate);
+  if (!stats.isDirectory() || stats.isSymbolicLink() || await realpath(candidate) !== candidate) {
+    throw new Error("Owned directory identity is invalid");
+  }
+  return { parent, path: candidate, dev: stats.dev, ino: stats.ino };
+}
+
+async function removeTreeNoFollow(directory: string): Promise<void> {
+  for (const name of await readdir(directory)) {
+    const child = path.join(directory, name);
+    const stats = await lstat(child);
+    if (stats.isDirectory() && !stats.isSymbolicLink()) {
+      await removeTreeNoFollow(child);
+    } else {
+      await unlink(child);
+    }
+  }
+  await rmdir(directory);
+}
+
+/**
+ * Portable Node has no openat/dirfd tree removal. We validate the private
+ * direct-child root and inode immediately before a no-follow recursive walk;
+ * a same-uid actor can still race path entries between those operations.
+ */
+async function removeOwnedDirectory(owned: OwnedDirectory): Promise<void> {
+  if (path.dirname(owned.path) !== owned.parent || path.resolve(owned.path) !== owned.path) {
+    throw new Error("Owned directory identity no longer matches its direct parent");
+  }
+  const stats = await lstat(owned.path).catch(() => {
+    throw new Error("Owned directory identity is missing");
+  });
+  if (!stats.isDirectory() || stats.isSymbolicLink()
+    || stats.dev !== owned.dev || stats.ino !== owned.ino
+    || await realpath(owned.path) !== owned.path) {
+    throw new Error("Owned directory identity changed");
+  }
+  await removeTreeNoFollow(owned.path);
 }
 
 function explicitToolPath(value: string): string {
@@ -253,11 +306,42 @@ function composeVerdict(input: {
   });
 }
 
+function effectiveScopeResult(results: readonly VerifierResult[]): VerifierResult {
+  const scope = results.find(({ id }) => id === "scope");
+  const preserve = results.find(({ id }) => id === "preserve_existing_changes");
+  if (scope === undefined || preserve === undefined) {
+    throw new Error("Dirty Tree scope evidence is incomplete");
+  }
+  const passed = scope.passed && preserve.passed;
+  return {
+    id: "scope",
+    passed,
+    hard_gate: false,
+    message: passed
+      ? "Scope and pre-existing protected changes were both preserved"
+      : `Scope failed: scope=${scope.passed}, preserve_existing_changes=${preserve.passed}`,
+    evidence: [...new Set([...scope.evidence, ...preserve.evidence])]
+  };
+}
+
 function snapshotIdentity(snapshot: SkillSnapshot): string {
   return sha256(canonicalJson({ source: snapshot.source, files: snapshot.files }));
 }
 
-async function copySnapshot(snapshotValue: SkillSnapshot, workspace: string): Promise<string> {
+function snapshotExecutionFingerprint(snapshot: SkillSnapshot): string {
+  return sha256(canonicalJson({
+    source: snapshot.source,
+    source_hash: snapshot.source_hash,
+    entrypoint: snapshot.entrypoint,
+    files: snapshot.files,
+    imported_path: snapshot.imported_path
+  }));
+}
+
+async function copySnapshot(snapshotValue: SkillSnapshot, workspace: string): Promise<{
+  entrypoint: string;
+  infrastructureRoot: OwnedDirectory;
+}> {
   const snapshot = SkillSnapshotSchema.parse(snapshotValue);
   if (snapshotIdentity(snapshot) !== snapshot.source_hash) {
     throw new Error("Snapshot hash does not match its immutable identity");
@@ -306,7 +390,10 @@ async function copySnapshot(snapshotValue: SkillSnapshot, workspace: string): Pr
     await writeFile(target, bytes, { flag: "wx", mode: 0o444 });
   }
   if (!seen.has(snapshot.entrypoint)) throw new Error("Snapshot entrypoint is missing");
-  return path.posix.join(".agents", "skills", "imported-skill", snapshot.entrypoint);
+  return {
+    entrypoint: path.posix.join(".agents", "skills", "imported-skill", snapshot.entrypoint),
+    infrastructureRoot: await captureOwnedDirectory(workspace, path.join(workspace, ".agents"))
+  };
 }
 
 function event(input: Omit<TraceEvent, "v" | "artifacts"> & { artifacts?: TraceEvent["artifacts"] }): TraceEvent {
@@ -320,6 +407,9 @@ export class RunOrchestrator {
   readonly #executed = new Set<string>();
 
   constructor(options: RunOrchestratorOptions) {
+    if (options.workspaceCleanupPolicy !== "retain-until-report-export") {
+      throw new Error("Workspace cleanup policy must retain evidence until report export");
+    }
     this.#options = options;
   }
 
@@ -356,13 +446,48 @@ export class RunOrchestrator {
       });
       try {
         await this.#options.runStore.create(envelope);
-        this.#runs.set(runId, { envelope, manifestId: manifest.id });
+        this.#runs.set(runId, {
+          envelope,
+          manifestId: manifest.id,
+          snapshotExecutionFingerprint: snapshotExecutionFingerprint(snapshot)
+        });
         return envelope;
       } catch (error) {
         if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
       }
     }
     throw new Error("Unable to allocate a collision-free run id");
+  }
+
+  /**
+   * Releases a retained workspace only after the caller proves report export.
+   * Cleanup authority is process-local and inode-bound; it is never recovered
+   * by guessing from persisted paths after restart.
+   */
+  async finalizeWorkspace(
+    runId: string,
+    authorization: { readonly report_exported: boolean }
+  ): Promise<{ removed: boolean }> {
+    if (!authorization.report_exported) {
+      throw new Error("Workspace cleanup requires completed report export");
+    }
+    const context = this.#runs.get(runId);
+    if (context === undefined) throw new Error("Workspace cleanup authority is unavailable after process restart");
+    if (context.envelope.state !== "completed" && context.envelope.state !== "errored") {
+      throw new Error("Workspace cleanup requires a terminal run");
+    }
+    if (context.workspaceCleaned) return { removed: false };
+    if (context.workspace === undefined) {
+      context.workspaceCleaned = true;
+      return { removed: false };
+    }
+    const workspaceRoot = await privateCanonicalDirectory(this.#options.workspaceRoot);
+    if (context.workspace.parent !== workspaceRoot) {
+      throw new Error("Retained workspace identity has a different private root");
+    }
+    await removeOwnedDirectory(context.workspace);
+    context.workspaceCleaned = true;
+    return { removed: true };
   }
 
   async execute(runId: string): Promise<VerdictBundle> {
@@ -443,7 +568,8 @@ export class RunOrchestrator {
       throw new Error("Manifest provider drifted after run creation");
     }
     if (snapshot.source_hash !== context.envelope.snapshot_hash
-      || snapshotIdentity(snapshot) !== context.envelope.snapshot_hash) {
+      || snapshotIdentity(snapshot) !== context.envelope.snapshot_hash
+      || snapshotExecutionFingerprint(snapshot) !== context.snapshotExecutionFingerprint) {
       throw new Error("Snapshot provider drifted after run creation");
     }
     let nextSeq = 0;
@@ -471,13 +597,13 @@ export class RunOrchestrator {
       actor: "arena", data: { manifest_id: manifest.id }
     }));
 
-    const workspaceRoot = await canonicalDirectory(this.#options.workspaceRoot);
+    const workspaceRoot = await privateCanonicalDirectory(this.#options.workspaceRoot);
     const workspace = path.join(workspaceRoot, runId);
     if (path.dirname(workspace) !== workspaceRoot) throw new Error("Run workspace escapes root");
-    await mkdir(workspace);
-    context.workspace = workspace;
+    await mkdir(workspace, { mode: 0o700 });
+    context.workspace = await captureOwnedDirectory(workspaceRoot, workspace);
     const baseline: FixtureBaseline = await materializeFixture(manifest.fixture.id, workspace);
-    const skillEntrypoint = await copySnapshot(snapshot, workspace);
+    const installedSkill = await copySnapshot(snapshot, workspace);
     const outputRoot = await privateCanonicalDirectory(this.#options.runnerOutputRoot);
     const token = randomUUID();
     const schemaPath = path.join(outputRoot, `${runId}-${token}.schema.json`);
@@ -490,14 +616,16 @@ export class RunOrchestrator {
     ]);
     let runnerPath = explicitToolPath(this.#options.toolPath);
     const faultIds = manifest.fault_cards.map(({ id }) => id);
+    let missingToolRoot: OwnedDirectory | undefined;
     if (faultIds.includes("missing-tool")) {
       const { pathPrefix } = await installMissingToolFault(workspace, "rg");
+      missingToolRoot = await captureOwnedDirectory(workspace, pathPrefix);
       runnerPath = `${pathPrefix}${path.delimiter}${runnerPath}`;
     }
     const runnerView = buildRunnerView(manifest);
     const prompt = [
       "Use the imported Skill to complete the Arena Runner brief.",
-      `IMPORTED_SKILL_ENTRYPOINT=${JSON.stringify(skillEntrypoint)}`,
+      `IMPORTED_SKILL_ENTRYPOINT=${JSON.stringify(installedSkill.entrypoint)}`,
       `RUNNER_VIEW_JSON=${canonicalJson(runnerView)}`
     ].join("\n");
     const normalizeContext: NormalizeContext = {
@@ -576,10 +704,12 @@ export class RunOrchestrator {
       actor: "arena", data: { phase: "judge" }
     }));
 
-    // Runtime-only Skill installation must not influence the locked filesystem audit.
-    await chmod(path.join(workspace, ".agents", "skills", "imported-skill"), 0o700).catch(() => undefined);
-    await rm(path.join(workspace, ".agents"), { recursive: true, force: true });
-    await rm(path.join(workspace, ".arena-bin"), { recursive: true, force: true });
+    // Runtime-only roots must not influence the locked filesystem audit. Root
+    // identity is checked before a no-follow removal; no path-based chmod is used.
+    await Promise.all([
+      removeOwnedDirectory(installedSkill.infrastructureRoot),
+      ...(missingToolRoot === undefined ? [] : [removeOwnedDirectory(missingToolRoot)])
+    ]);
     const trace = await this.#options.runStore.readEvents(runId);
     const dirtyVerdict = VerdictBundleSchema.parse(await verifyDirtyTree({
       run_id: runId,
@@ -608,6 +738,7 @@ export class RunOrchestrator {
       });
       const available = new Map(dirtyVerdict.verifier_results.map((result) => [result.id, result]));
       for (const result of falseGreen) available.set(result.id, result);
+      available.set("scope", effectiveScopeResult(dirtyVerdict.verifier_results));
       verdict = composeVerdict({
         runId,
         manifest,
@@ -616,6 +747,7 @@ export class RunOrchestrator {
       });
     } else if (manifest.id === "repo-missing-tool-v1" && onlyFault === "missing-tool") {
       const available = new Map(dirtyVerdict.verifier_results.map((result) => [result.id, result]));
+      available.set("scope", effectiveScopeResult(dirtyVerdict.verifier_results));
       const toolRecovery = scoreMissingToolRetries(
         trace,
         "rg",
