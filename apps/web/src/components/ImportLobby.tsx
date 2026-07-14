@@ -31,8 +31,41 @@ const PREFLIGHT_LABELS: Record<PreflightResult["checks"][number]["id"], string> 
   "git-version": "Git",
   "app-data": "App data"
 };
+const REQUIRED_PREFLIGHT_IDS = [
+  "codex-version",
+  "codex-login",
+  "git-version",
+  "app-data"
+] as const satisfies readonly PreflightResult["checks"][number]["id"][];
+const DIRTY_TREE_MANIFEST_ID = "repo-dirty-tree-v1";
+const DIRTY_TREE_FAULT_CARD_ID = "dirty-tree";
 
 type SourceTab = typeof SOURCE_TABS[number]["id"];
+
+function isPathLikeSource(uri: string): boolean {
+  const value = uri.trim();
+  return /^file:/i.test(value)
+    || value.startsWith("/")
+    || value.startsWith("\\\\")
+    || /^[a-z]:[\\/]/i.test(value);
+}
+
+function isUnknownLicense(license: string): boolean {
+  const value = license.trim().toLowerCase();
+  return value === "unknown" || value === "noassertion";
+}
+
+function isDirtyTreeManifest(manifest: ReplayManifest): boolean {
+  return manifest.id === DIRTY_TREE_MANIFEST_ID
+    && manifest.fault_cards.some((card) => card.id === DIRTY_TREE_FAULT_CARD_ID);
+}
+
+function hasRequiredPreflightChecks(health: PreflightResult): boolean {
+  return REQUIRED_PREFLIGHT_IDS.every((id) => {
+    const matches = health.checks.filter((check) => check.id === id);
+    return matches.length === 1 && matches[0]!.ok;
+  });
+}
 
 function ProgressRail({ current }: { readonly current: number }): React.JSX.Element {
   return (
@@ -47,7 +80,7 @@ function ProgressRail({ current }: { readonly current: number }): React.JSX.Elem
 }
 
 function SnapshotPanel({ snapshot }: { readonly snapshot: SkillSnapshot }): React.JSX.Element {
-  const source = snapshot.source.kind === "local"
+  const source = snapshot.source.kind === "local" || isPathLikeSource(snapshot.source.uri)
     ? "Local source (path hidden)"
     : snapshot.source.kind === "zip"
       ? "Uploaded ZIP archive"
@@ -63,7 +96,16 @@ function SnapshotPanel({ snapshot }: { readonly snapshot: SkillSnapshot }): Reac
         <div><dt>Canonical source</dt><dd>{source}</dd></div>
         <div><dt>Revision</dt><dd>{snapshot.source.revision ?? "Not provided"}</dd></div>
         <div><dt>Entry point</dt><dd>{snapshot.entrypoint}</dd></div>
-        <div><dt>License</dt><dd>{snapshot.license}</dd></div>
+        <div>
+          <dt>License</dt>
+          <dd>
+            {isUnknownLicense(snapshot.license) ? (
+              <span className="license-warning" role="status">
+                Unknown — License metadata unavailable
+              </span>
+            ) : snapshot.license}
+          </dd>
+        </div>
         <div><dt>File count</dt><dd>{snapshot.files.length}</dd></div>
         <div><dt>Source hash</dt><dd><code>{snapshot.source_hash.slice(0, 10)}…</code></dd></div>
       </dl>
@@ -116,27 +158,33 @@ function ContractPanel({ contract }: { readonly contract: SkillContract }): Reac
   );
 }
 
-function PreflightPanel({ health }: { readonly health: PreflightResult | null }): React.JSX.Element {
+function PreflightPanel(props: {
+  readonly health: PreflightResult | null;
+  readonly error: string | null;
+}): React.JSX.Element {
   return (
     <section aria-labelledby="preflight-title" className="preflight-panel">
       <h2 id="preflight-title">Runner Preflight</h2>
-      {health === null ? <p>Checking local runner…</p> : (
+      {props.error !== null ? <p className="panel-error" role="alert">{props.error}</p>
+        : props.health === null ? <p>Checking local runner…</p> : (
         <div className="preflight-list">
-          {health.checks.map((check) => (
-            <div className="preflight-row" key={check.id}>
+          {props.health.checks.map((check, index) => (
+            <div className="preflight-row" key={`${check.id}:${index}`}>
               <span>{PREFLIGHT_LABELS[check.id]}</span>
-              <strong>{check.ok ? "Ready" : "Blocked"}</strong>
+              <strong className={check.ok ? "status-ready" : "status-blocked"}>
+                {check.ok ? "Ready" : "Blocked"}
+              </strong>
               <small>{check.message}</small>
             </div>
           ))}
           <div className="preflight-row">
             <span>Exact model</span>
-            <strong>{health.model.target}</strong>
-            <small>{health.model.status}</small>
+            <strong>{props.health.model.target}</strong>
+            <small className="status-advisory">{props.health.model.status}</small>
           </div>
           <div className="preflight-row">
             <span>Sandbox</span>
-            <strong>Configured policy</strong>
+            <strong className="status-policy">Configured policy</strong>
             <small>Disposable workspace / workspace-write run copy</small>
           </div>
         </div>
@@ -153,7 +201,7 @@ export function ImportLobby({ api, onRunStarted }: ImportLobbyProps): React.JSX.
   const [snapshot, setSnapshot] = useState<SkillSnapshot | null>(null);
   const [contract, setContract] = useState<SkillContract | null>(null);
   const [health, setHealth] = useState<PreflightResult | null>(null);
-  const [manifests, setManifests] = useState<ReplayManifest[]>([]);
+  const [manifests, setManifests] = useState<ReplayManifest[] | null>(null);
   const [selectedManifestId, setSelectedManifestId] = useState<string | null>(null);
   const [busy, setBusy] = useState<"inspect" | "start" | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -161,14 +209,44 @@ export function ImportLobby({ api, onRunStarted }: ImportLobbyProps): React.JSX.
   const [manifestError, setManifestError] = useState<string | null>(null);
   const mountedRef = useRef(true);
   const inspectSequenceRef = useRef(0);
+  const stateGenerationRef = useRef(0);
+  const prefetchSequenceRef = useRef(0);
   const busyRef = useRef(false);
+  const tabRefs = useRef<Array<HTMLButtonElement | null>>([]);
 
   useEffect(() => {
     mountedRef.current = true;
+    return () => {
+      mountedRef.current = false;
+      inspectSequenceRef.current += 1;
+      stateGenerationRef.current += 1;
+    };
+  }, []);
+
+  useEffect(() => {
+    let cancelled = false;
+    const generation = stateGenerationRef.current + 1;
+    stateGenerationRef.current = generation;
+    const prefetchSequence = prefetchSequenceRef.current + 1;
+    prefetchSequenceRef.current = prefetchSequence;
+    inspectSequenceRef.current += 1;
+    busyRef.current = false;
+    setBusy(null);
+    setSnapshot(null);
+    setContract(null);
+    setHealth(null);
+    setManifests(null);
+    setSelectedManifestId(null);
+    setError(null);
+    setPreflightError(null);
+    setManifestError(null);
     const loadHealth = api.health();
     const loadManifests = api.listManifests();
     void Promise.allSettled([loadHealth, loadManifests]).then(([healthResult, manifestResult]) => {
-      if (!mountedRef.current) return;
+      if (cancelled
+        || !mountedRef.current
+        || stateGenerationRef.current !== generation
+        || prefetchSequenceRef.current !== prefetchSequence) return;
       if (healthResult.status === "fulfilled") {
         setHealth(healthResult.value);
       } else {
@@ -181,26 +259,30 @@ export function ImportLobby({ api, onRunStarted }: ImportLobbyProps): React.JSX.
       }
     });
     return () => {
-      mountedRef.current = false;
-      inspectSequenceRef.current += 1;
+      cancelled = true;
     };
   }, [api]);
 
   const repositoryWorkflow = snapshot === null || snapshot.source.kind !== "zip";
-  const sortedManifests = repositoryWorkflow
-    ? manifests.toSorted((left, right) => {
-      const leftDirty = left.id.includes("dirty") ? 0 : 1;
-      const rightDirty = right.id.includes("dirty") ? 0 : 1;
-      return leftDirty - rightDirty;
-    })
-    : manifests;
+  const sortedManifests = (manifests ?? []).toSorted((left, right) => {
+    if (repositoryWorkflow) {
+      const rankDifference = Number(isDirtyTreeManifest(right))
+        - Number(isDirtyTreeManifest(left));
+      if (rankDifference !== 0) return rankDifference;
+    }
+    const idDifference = left.id.localeCompare(right.id);
+    return idDifference === 0 ? left.name.localeCompare(right.name) : idDifference;
+  });
   const manifest = sortedManifests.find((item) => item.id === selectedManifestId)
     ?? sortedManifests[0]
     ?? null;
+  const preflightReady = health !== null
+    && health.ok
+    && hasRequiredPreflightChecks(health);
   const canStart = snapshot !== null
     && contract !== null
     && manifest !== null
-    && health?.ok === true
+    && preflightReady
     && busy === null;
   const sourceReady = sourceTab === "git"
     ? githubUrl.trim().length > 0
@@ -210,7 +292,6 @@ export function ImportLobby({ api, onRunStarted }: ImportLobbyProps): React.JSX.
         ? zipFile !== null
         : true;
   const progressStep = canStart ? 3 : snapshot !== null ? 2 : busy === "inspect" ? 1 : 0;
-  const visibleError = error ?? preflightError ?? manifestError;
 
   function invalidateInspection(): void {
     inspectSequenceRef.current += 1;
@@ -228,6 +309,24 @@ export function ImportLobby({ api, onRunStarted }: ImportLobbyProps): React.JSX.
     if (tab === sourceTab || busy === "start") return;
     invalidateInspection();
     setSourceTab(tab);
+  }
+
+  function handleTabKeyDown(
+    event: React.KeyboardEvent<HTMLButtonElement>,
+    currentIndex: number
+  ): void {
+    if (busy === "start") return;
+    let nextIndex: number | null = null;
+    if (event.key === "ArrowRight") nextIndex = (currentIndex + 1) % SOURCE_TABS.length;
+    if (event.key === "ArrowLeft") {
+      nextIndex = (currentIndex - 1 + SOURCE_TABS.length) % SOURCE_TABS.length;
+    }
+    if (event.key === "Home") nextIndex = 0;
+    if (event.key === "End") nextIndex = SOURCE_TABS.length - 1;
+    if (nextIndex === null) return;
+    event.preventDefault();
+    chooseSource(SOURCE_TABS[nextIndex]!.id);
+    tabRefs.current[nextIndex]?.focus();
   }
 
   function buildImportRequest(): BrowserImportRequest | null {
@@ -252,22 +351,31 @@ export function ImportLobby({ api, onRunStarted }: ImportLobbyProps): React.JSX.
     busyRef.current = true;
     const sequence = inspectSequenceRef.current + 1;
     inspectSequenceRef.current = sequence;
+    const generation = stateGenerationRef.current;
     setBusy("inspect");
     setError(null);
     setSnapshot(null);
     setContract(null);
     try {
       const nextSnapshot = await api.importSkill(request);
-      if (!mountedRef.current || inspectSequenceRef.current !== sequence) return;
+      if (!mountedRef.current
+        || stateGenerationRef.current !== generation
+        || inspectSequenceRef.current !== sequence) return;
       const nextContract = await api.compileContract(nextSnapshot.source_hash);
-      if (!mountedRef.current || inspectSequenceRef.current !== sequence) return;
+      if (!mountedRef.current
+        || stateGenerationRef.current !== generation
+        || inspectSequenceRef.current !== sequence) return;
       setSnapshot(nextSnapshot);
       setContract(nextContract);
     } catch {
-      if (!mountedRef.current || inspectSequenceRef.current !== sequence) return;
+      if (!mountedRef.current
+        || stateGenerationRef.current !== generation
+        || inspectSequenceRef.current !== sequence) return;
       setError("Unable to inspect this source safely.");
     } finally {
-      if (mountedRef.current && inspectSequenceRef.current === sequence) {
+      if (mountedRef.current
+        && stateGenerationRef.current === generation
+        && inspectSequenceRef.current === sequence) {
         busyRef.current = false;
         setBusy(null);
       }
@@ -277,19 +385,24 @@ export function ImportLobby({ api, onRunStarted }: ImportLobbyProps): React.JSX.
   async function startCrashTest(): Promise<void> {
     if (busyRef.current || !canStart || snapshot === null || manifest === null) return;
     busyRef.current = true;
+    const generation = stateGenerationRef.current;
     setBusy("start");
     setError(null);
+    let createdRunId: string | null = null;
     try {
       const run = await api.startRun(manifest.id, snapshot.source_hash);
-      if (mountedRef.current) onRunStarted(run.run_id);
+      createdRunId = run.run_id;
     } catch {
-      if (mountedRef.current) setError("Unable to start this run safely.");
+      if (mountedRef.current && stateGenerationRef.current === generation) {
+        setError("Unable to start this run safely.");
+      }
     } finally {
-      if (mountedRef.current) {
+      if (mountedRef.current && stateGenerationRef.current === generation) {
         busyRef.current = false;
         setBusy(null);
       }
     }
+    if (createdRunId !== null) onRunStarted(createdRunId);
   }
 
   return (
@@ -306,13 +419,18 @@ export function ImportLobby({ api, onRunStarted }: ImportLobbyProps): React.JSX.
           <section aria-labelledby="source-title" className="source-panel">
             <h2 id="source-title">Source</h2>
             <div className="source-tabs" role="tablist" aria-label="Skill source">
-              {SOURCE_TABS.map((tab) => (
+              {SOURCE_TABS.map((tab, index) => (
                 <button
                   aria-controls={`source-panel-${tab.id}`}
                   aria-selected={sourceTab === tab.id}
+                  disabled={busy === "start"}
                   id={`source-tab-${tab.id}`}
                   key={tab.id}
                   onClick={() => chooseSource(tab.id)}
+                  onKeyDown={(event) => handleTabKeyDown(event, index)}
+                  ref={(element) => {
+                    tabRefs.current[index] = element;
+                  }}
                   role="tab"
                   tabIndex={sourceTab === tab.id ? 0 : -1}
                   type="button"
@@ -331,6 +449,7 @@ export function ImportLobby({ api, onRunStarted }: ImportLobbyProps): React.JSX.
                   <label htmlFor="github-url">GitHub URL</label>
                   <input
                     id="github-url"
+                    disabled={busy === "start"}
                     onChange={(event) => {
                       invalidateInspection();
                       setGithubUrl(event.currentTarget.value);
@@ -345,6 +464,7 @@ export function ImportLobby({ api, onRunStarted }: ImportLobbyProps): React.JSX.
                   <label htmlFor="local-path">Local path</label>
                   <input
                     id="local-path"
+                    disabled={busy === "start"}
                     onChange={(event) => {
                       invalidateInspection();
                       setLocalPath(event.currentTarget.value);
@@ -359,6 +479,7 @@ export function ImportLobby({ api, onRunStarted }: ImportLobbyProps): React.JSX.
                   <label htmlFor="zip-file">ZIP file</label>
                   <input
                     accept=".zip,application/zip"
+                    disabled={busy === "start"}
                     id="zip-file"
                     onChange={(event) => {
                       invalidateInspection();
@@ -385,7 +506,7 @@ export function ImportLobby({ api, onRunStarted }: ImportLobbyProps): React.JSX.
             >
               {busy === "inspect" ? "Inspecting…" : "Inspect source"}
             </button>
-            {visibleError === null ? null : <p role="alert">{visibleError}</p>}
+            {error === null ? null : <p role="alert">{error}</p>}
           </section>
         </div>
         <div className="configuration-column">
@@ -393,19 +514,26 @@ export function ImportLobby({ api, onRunStarted }: ImportLobbyProps): React.JSX.
           {contract === null ? null : <ContractPanel contract={contract} />}
           <section aria-labelledby="arena-title" className="arena-card">
             <h2 id="arena-title">Arena Match</h2>
-            {sortedManifests.length === 0 ? <p>Loading Replay-safe manifests…</p> : (
+            {manifestError !== null ? (
+              <p className="panel-error" role="alert">{manifestError}</p>
+            ) : manifests === null ? (
+              <p>Loading Replay-safe manifests…</p>
+            ) : sortedManifests.length === 0 ? (
+              <p>No Replay-safe manifests available.</p>
+            ) : (
               <div className="manifest-options">
-                {sortedManifests.map((item, index) => (
+                {sortedManifests.map((item) => (
                   <label key={item.id}>
                     <input
                       checked={manifest?.id === item.id}
+                      disabled={busy === "start"}
                       name="arena-manifest"
                       onChange={() => setSelectedManifestId(item.id)}
                       type="radio"
                     />
                     <strong>{item.name}</strong>
                     <span>
-                      {repositoryWorkflow && index === 0
+                      {repositoryWorkflow && isDirtyTreeManifest(item)
                         ? "Best compatibility for repository mutation checks."
                         : `Fixture ${item.fixture.id} v${item.fixture.version}; ${item.fault_cards.length} fault card(s).`}
                     </span>
@@ -414,7 +542,7 @@ export function ImportLobby({ api, onRunStarted }: ImportLobbyProps): React.JSX.
               </div>
             )}
           </section>
-          <PreflightPanel health={health} />
+          <PreflightPanel error={preflightError} health={health} />
           <div className="start-zone">
             <div className="run-boundaries">
               <span>Original source <strong>READ-ONLY</strong></span>

@@ -460,6 +460,16 @@ h1 {
   color: #c4b5fd;
 }
 
+.license-warning,
+.status-advisory,
+.status-policy {
+  color: #fbbf24 !important;
+}
+
+.license-warning {
+  font-weight: 700;
+}
+
 .contract-group {
   display: grid;
   grid-template-columns: 122px minmax(0, 1fr);
@@ -581,7 +591,21 @@ h1 {
 }
 
 .preflight-row strong {
+  color: #cbd5e1;
+}
+
+.preflight-row .status-ready {
   color: #86efac;
+}
+
+.preflight-row .status-blocked {
+  color: #fda4af;
+}
+
+.panel-error {
+  margin: 14px 0 0;
+  color: #fda4af;
+  font-size: 0.75rem;
 }
 
 .start-zone {
