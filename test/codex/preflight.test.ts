@@ -1,6 +1,10 @@
+import { EventEmitter } from "node:events";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
+import { PassThrough } from "node:stream";
+
+import type { ChildProcessWithoutNullStreams } from "node:child_process";
 
 import { afterEach, describe, expect, it } from "vitest";
 
@@ -114,6 +118,53 @@ describe("runPreflight", () => {
     expect(overlapObserved).toBe(false);
     expect(commandActive).toBe(false);
     expect(result.checks[0]).toMatchObject({ id: "codex-version", ok: false });
+  });
+
+  it("does not start the next default-executor check until a delayed child close beyond the fallback margin", async () => {
+    const appDataDir = await mkdtemp(path.join(tmpdir(), "scta-preflight-"));
+    roots.push(appDataDir);
+    let firstClosed = false;
+    let overlapObserved = false;
+    let spawnCalls = 0;
+
+    const spawn = ((_command: string, args: readonly string[]) => {
+      spawnCalls += 1;
+      if (spawnCalls > 1 && !firstClosed) overlapObserved = true;
+      const child = new EventEmitter() as ChildProcessWithoutNullStreams;
+      Object.assign(child, {
+        pid: undefined,
+        stdin: new PassThrough(),
+        stdout: new PassThrough(),
+        stderr: new PassThrough()
+      });
+
+      if (spawnCalls === 1) {
+        setTimeout(() => {
+          firstClosed = true;
+          child.emit("close", null);
+        }, 160);
+      } else {
+        queueMicrotask(() => {
+          child.stdout.emit("data", Buffer.from(args[0] === "login" ? "Logged in using ChatGPT\n" : "git version 2.53.0\n"));
+          child.emit("close", 0);
+        });
+      }
+      return child;
+    }) as typeof import("node:child_process").spawn;
+
+    const result = await runPreflight({
+      appDataDir,
+      commandTimeoutMs: 5,
+      killGraceMs: 5,
+      spawn
+    });
+
+    expect(spawnCalls).toBe(3);
+    expect(firstClosed).toBe(true);
+    expect(overlapObserved).toBe(false);
+    expect(result.checks[0]).toMatchObject({ id: "codex-version", ok: false });
+    expect(result.checks[1]).toMatchObject({ id: "codex-login", ok: true });
+    expect(result.checks[2]).toMatchObject({ id: "git-version", ok: true });
   });
 
   it("rejects noisy injected command results without retaining their raw output", async () => {

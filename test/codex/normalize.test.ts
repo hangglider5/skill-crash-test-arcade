@@ -144,6 +144,68 @@ describe("normalizeCodexEvent", () => {
     expect(ctx.next_seq).toBe(5);
   });
 
+  it.each([
+    {
+      name: "an undefined sink result",
+      malformed: () => undefined
+    },
+    {
+      name: "a throwing ref getter",
+      malformed: () => Object.defineProperty({}, "ref", {
+        get: () => { throw new Error("private ref getter details"); }
+      })
+    },
+    {
+      name: "an invalid ref string",
+      malformed: () => ({ ref: "not-an-artifact-ref" })
+    }
+  ])("maps $name to a typed safe rejection, aborts it, and accepts the next write", async ({ malformed }) => {
+    let calls = 0;
+    let firstSignal: AbortSignal | undefined;
+    const sink: ArtifactSink = {
+      put: async (_data, _metadata, options) => {
+        calls += 1;
+        if (calls === 1) {
+          firstSignal = options.signal;
+          return malformed() as Awaited<ReturnType<ArtifactSink["put"]>>;
+        }
+        return { ref: `sha256:${"f".repeat(64)}` as const };
+      }
+    };
+    const ctx = context({
+      artifact_sink: sink,
+      artifact_sink_timeout_ms: 50,
+      max_inline_output_bytes: 4
+    });
+    const raw = (id: string) => ({
+      type: "item.completed",
+      item: { id, type: "command_execution", command: id, aggregated_output: "large output", exit_code: 0 }
+    });
+
+    const outcome = await Promise.race([
+      normalizeCodexEvent(raw("malformed"), ctx).then(
+        () => ({ status: "resolved" as const }),
+        (error: unknown) => ({ status: "rejected" as const, error })
+      ),
+      new Promise<{ status: "pending" }>((resolve) => {
+        setTimeout(() => resolve({ status: "pending" }), 100);
+      })
+    ]);
+
+    expect(outcome.status).toBe("rejected");
+    if (outcome.status !== "rejected") return;
+    expect(outcome.error).toBeInstanceOf(NormalizerArtifactError);
+    expect(outcome.error).toMatchObject({ code: "NORMALIZER_ARTIFACT_REJECTED" });
+    expect(outcome.error).not.toHaveProperty("cause");
+    expect((outcome.error as Error).message).not.toContain("private");
+    expect(firstSignal?.aborted).toBe(true);
+    expect(ctx.next_seq).toBe(4);
+    await expect(normalizeCodexEvent(raw("recovered"), ctx)).resolves.toMatchObject([
+      { seq: 4, span_id: "recovered", artifacts: [`sha256:${"f".repeat(64)}`] }
+    ]);
+    expect(ctx.next_seq).toBe(5);
+  });
+
   it("times out a never-settling sink, aborts it, and leaves the context queue usable", async () => {
     let calls = 0;
     let abortObserved = false;

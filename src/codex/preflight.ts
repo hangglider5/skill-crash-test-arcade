@@ -29,6 +29,7 @@ export type PreflightExecutor = (
 export interface PreflightOptions {
   appDataDir?: string;
   execute?: PreflightExecutor;
+  spawn?: typeof spawn;
   commandTimeoutMs?: number;
   maxStdoutBytes?: number;
   maxStderrBytes?: number;
@@ -48,10 +49,11 @@ export async function executePreflightCommand(
   command: string,
   args: readonly string[],
   limits: PreflightCommandLimits,
-  signal: AbortSignal
+  signal: AbortSignal,
+  spawnCommand: typeof spawn = spawn
 ): Promise<CommandResult> {
   return new Promise((resolve, reject) => {
-    const child = spawn(command, [...args], {
+    const child = spawnCommand(command, [...args], {
       shell: false,
       detached: process.platform !== "win32",
       stdio: ["ignore", "pipe", "pipe"]
@@ -215,7 +217,6 @@ function hasCanonicalLoginLine(output: string): boolean {
 }
 
 export async function runPreflight(options: PreflightOptions = {}): Promise<PreflightResult> {
-  const execute = options.execute ?? executePreflightCommand;
   const limits: PreflightCommandLimits = {
     timeout_ms: options.commandTimeoutMs ?? 5_000,
     max_stdout_bytes: options.maxStdoutBytes ?? 64 * 1024,
@@ -225,7 +226,9 @@ export async function runPreflight(options: PreflightOptions = {}): Promise<Pref
   const checks: PreflightCheck[] = [];
 
   try {
-    const result = await boundedExecute(execute, "codex", ["--version"], limits);
+    const result = options.execute
+      ? await boundedExecute(options.execute, "codex", ["--version"], limits)
+      : await executePreflightCommand("codex", ["--version"], limits, new AbortController().signal, options.spawn);
     const match = /\bcodex(?:-cli)?\s+(\d+)\.(\d+)\.(\d+)\b/iu.exec(`${result.stdout}\n${result.stderr}`);
     const supported = result.exit_code === 0 && match !== null
       && versionAtLeast(match.slice(1).map(Number), [0, 144, 2]);
@@ -239,7 +242,9 @@ export async function runPreflight(options: PreflightOptions = {}): Promise<Pref
   }
 
   try {
-    const result = await boundedExecute(execute, "codex", ["login", "status"], limits);
+    const result = options.execute
+      ? await boundedExecute(options.execute, "codex", ["login", "status"], limits)
+      : await executePreflightCommand("codex", ["login", "status"], limits, new AbortController().signal, options.spawn);
     const loggedIn = result.exit_code === 0 && hasCanonicalLoginLine(`${result.stdout}\n${result.stderr}`);
     checks.push({ id: "codex-login", ok: loggedIn, message: loggedIn ? "Codex is logged in" : "Codex login is required" });
   } catch {
@@ -247,7 +252,9 @@ export async function runPreflight(options: PreflightOptions = {}): Promise<Pref
   }
 
   try {
-    const result = await boundedExecute(execute, "git", ["--version"], limits);
+    const result = options.execute
+      ? await boundedExecute(options.execute, "git", ["--version"], limits)
+      : await executePreflightCommand("git", ["--version"], limits, new AbortController().signal, options.spawn);
     const match = /\bgit version\s+\d+\.\d+(?:\.\d+)?\b/iu.exec(`${result.stdout}\n${result.stderr}`);
     const available = result.exit_code === 0 && match !== null;
     checks.push({ id: "git-version", ok: available, message: available ? match?.[0] ?? "Git available" : "Git is unavailable" });

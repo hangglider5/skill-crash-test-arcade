@@ -1,4 +1,4 @@
-import { TraceEventSchema, type TraceEvent } from "../protocol/index.js";
+import { ArtifactRefSchema, TraceEventSchema, type TraceEvent } from "../protocol/index.js";
 import type { NormalizeContext } from "./types.js";
 
 export type NormalizerArtifactErrorCode =
@@ -162,9 +162,19 @@ async function storeArtifact(
     )).then(
       (stored) => {
         if (settled) return;
-        settled = true;
-        clearTimeout(timeoutHandle);
-        resolve(stored.ref);
+        try {
+          const ref = ArtifactRefSchema.parse(
+            (stored as { ref?: unknown } | null | undefined)?.ref
+          );
+          settled = true;
+          clearTimeout(timeoutHandle);
+          resolve(ref);
+        } catch {
+          finishReject(new NormalizerArtifactError(
+            "NORMALIZER_ARTIFACT_REJECTED",
+            "The artifact sink rejected the command output"
+          ));
+        }
       },
       () => {
         finishReject(new NormalizerArtifactError(
