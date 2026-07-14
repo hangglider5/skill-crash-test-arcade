@@ -136,6 +136,23 @@ function normalizeProcessError(
     );
 }
 
+function storedProcessError(
+  error: unknown,
+  argv: readonly string[],
+  privateFullSuite: boolean
+): ProcessExecutionError {
+  const normalized = normalizeProcessError(error, argv);
+  return new ProcessExecutionError(
+    normalized.code,
+    storedText(normalized.message, privateFullSuite),
+    {
+      argv: storedArgv(normalized.argv, privateFullSuite),
+      stdout: storedText(normalized.stdout, privateFullSuite),
+      stderr: storedText(normalized.stderr, privateFullSuite)
+    }
+  );
+}
+
 async function runAndStore(
   input: VerifyFalseGreenInput,
   argv: readonly [string, ...string[]],
@@ -155,7 +172,7 @@ async function runAndStore(
     );
     return { result, evidence: record.ref };
   } catch (error) {
-    const processError = normalizeProcessError(error, argv);
+    const processError = storedProcessError(error, argv, privateFullSuite);
     const record = await input.artifact_store.put(
       processFailureArtifact(processError, privateFullSuite),
       { mime: "application/json", redacted: privateFullSuite }
