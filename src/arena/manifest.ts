@@ -46,7 +46,10 @@ export function buildRunnerView(manifest: ArenaManifest): RunnerView {
     id: manifest.id,
     name: manifest.name,
     task: manifest.runner_brief.task,
-    budgets: manifest.budgets,
+    budgets: {
+      wall_time_s: manifest.budgets.wall_time_s,
+      max_command_retries: manifest.budgets.max_command_retries
+    },
     fault_labels: manifest.fault_cards.map(({ id }) => id)
   };
 }
@@ -56,9 +59,18 @@ export function buildReplayManifest(manifest: ArenaManifest): ReplayManifest {
     schema: "arena.replay-manifest/v1",
     id: manifest.id,
     name: manifest.name,
-    fixture: manifest.fixture,
-    fault_cards: manifest.fault_cards,
-    budgets: manifest.budgets,
-    scoring: manifest.scoring
+    fixture: {
+      id: manifest.fixture.id,
+      version: manifest.fixture.version
+    },
+    fault_cards: manifest.fault_cards.map(({ id, version }) => ({ id, version })),
+    budgets: {
+      wall_time_s: manifest.budgets.wall_time_s,
+      max_command_retries: manifest.budgets.max_command_retries
+    },
+    scoring: {
+      weights: { ...manifest.scoring.weights },
+      hard_gates: [...manifest.scoring.hard_gates]
+    }
   };
 }

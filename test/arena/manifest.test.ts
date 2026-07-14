@@ -94,6 +94,37 @@ describe("Arena Manifest views", () => {
     expect(replay).not.toHaveProperty("judge_pack");
     expect(replay).not.toHaveProperty("verifiers");
   });
+
+  it("keeps Runner View mutations isolated from the loaded manifest", async () => {
+    const loaded = await loadManifest("manifests/dirty-tree.v1.json");
+    const snapshot = structuredClone(loaded.manifest);
+    const runner = buildRunnerView(loaded.manifest);
+
+    runner.budgets.wall_time_s = 1;
+    runner.budgets.max_command_retries = 99;
+    runner.fault_labels[0] = "mutated-fault";
+
+    expect(loaded.manifest).toEqual(snapshot);
+    expect(sha256(canonicalJson(loaded.manifest))).toBe(loaded.hash);
+  });
+
+  it("keeps Replay Manifest mutations isolated from the loaded manifest", async () => {
+    const loaded = await loadManifest("manifests/dirty-tree.v1.json");
+    const snapshot = structuredClone(loaded.manifest);
+    const replay = buildReplayManifest(loaded.manifest);
+
+    replay.fixture.id = "mutated-fixture";
+    replay.fixture.version = 99;
+    replay.fault_cards[0]!.id = "mutated-fault";
+    replay.fault_cards[0]!.version = 99;
+    replay.budgets.wall_time_s = 1;
+    replay.budgets.max_command_retries = 99;
+    replay.scoring.weights.task_correctness = 0;
+    replay.scoring.hard_gates[0] = "mutated-gate";
+
+    expect(loaded.manifest).toEqual(snapshot);
+    expect(sha256(canonicalJson(loaded.manifest))).toBe(loaded.hash);
+  });
 });
 
 describe("loadManifest", () => {
