@@ -18,6 +18,11 @@ import type {
 import { EventBus } from "../../src/core/events.js";
 import { importSkill } from "../../src/core/importer.js";
 import { RunOrchestrator } from "../../src/core/orchestrator.js";
+import {
+  canonicalJson,
+  sha256,
+  type RunEnvelope
+} from "../../src/protocol/index.js";
 
 const manifestPath = fileURLToPath(new URL(
   "../../manifests/dirty-tree.v1.json",
@@ -31,6 +36,22 @@ const missingToolManifestPath = fileURLToPath(new URL(
   "../../manifests/missing-tool.v1.json",
   import.meta.url
 ));
+
+function expectedLineage(loaded: Awaited<ReturnType<typeof loadManifest>>) {
+  return {
+    manifest_hash: loaded.hash,
+    fixture_hash: sha256(canonicalJson(loaded.manifest.fixture)),
+    runner: { adapter: "codex-cli" as const, model: "gpt-5.6" as const }
+  };
+}
+
+class CountingRunStore extends RunStore {
+  createCalls = 0;
+  override async create(envelope: RunEnvelope): Promise<void> {
+    this.createCalls += 1;
+    await super.create(envelope);
+  }
+}
 
 class ScriptedRunner implements AgentRunner {
   async run(input: AgentRunInput, onEvent: AgentEventHandler): Promise<AgentRunResult> {
@@ -178,7 +199,7 @@ describe("RunOrchestrator", () => {
     ]);
     const snapshot = await importSkill({ kind: "sample", id: "repo-bugfix" }, importsRoot);
     const loadedManifest = await loadManifest(manifestPath);
-    const runStore = new RunStore(path.join(root, "runs"));
+    const runStore = new CountingRunStore(path.join(root, "runs"));
     const eventBus = new EventBus();
     const published: number[] = [];
 
@@ -201,11 +222,25 @@ describe("RunOrchestrator", () => {
       }
     });
 
+    await expect(orchestrator.createRun({
+      manifest_id: "repo-dirty-tree-v1",
+      snapshot_hash: snapshot.source_hash,
+      run_group_id: "group_01",
+      trial_index: 0,
+      expected_lineage: {
+        ...expectedLineage(loadedManifest),
+        manifest_hash: "f".repeat(64)
+      }
+    })).rejects.toThrow("expected lineage");
+    expect(runStore.createCalls).toBe(0);
+    await expect(readdir(path.join(root, "runs"))).rejects.toMatchObject({ code: "ENOENT" });
+
     const run = await orchestrator.createRun({
       manifest_id: "repo-dirty-tree-v1",
       snapshot_hash: snapshot.source_hash,
       run_group_id: "group_01",
-      trial_index: 0
+      trial_index: 0,
+      expected_lineage: expectedLineage(loadedManifest)
     });
     eventBus.subscribe(run.run_id, (event) => {
       published.push(event.seq);
@@ -268,7 +303,8 @@ describe("RunOrchestrator", () => {
       manifest_id: loadedManifest.manifest.id,
       snapshot_hash: snapshot.source_hash,
       run_group_id: "group_error",
-      trial_index: 0
+      trial_index: 0,
+      expected_lineage: expectedLineage(loadedManifest)
     });
 
     const verdict = await orchestrator.execute(run.run_id);
@@ -391,7 +427,8 @@ describe("RunOrchestrator", () => {
       manifest_id: loadedManifest.manifest.id,
       snapshot_hash: snapshot.source_hash,
       run_group_id: "group_cards",
-      trial_index: 0
+      trial_index: 0,
+      expected_lineage: expectedLineage(loadedManifest)
     });
 
     const verdict = await orchestrator.execute(run.run_id);
@@ -456,7 +493,8 @@ describe("RunOrchestrator", () => {
       manifest_id: loadedManifest.manifest.id,
       snapshot_hash: snapshot.source_hash,
       run_group_id: "group_symlink",
-      trial_index: 0
+      trial_index: 0,
+      expected_lineage: expectedLineage(loadedManifest)
     });
 
     const verdict = await orchestrator.execute(run.run_id);
@@ -495,7 +533,8 @@ describe("RunOrchestrator", () => {
       manifest_id: loadedManifest.manifest.id,
       snapshot_hash: snapshot.source_hash,
       run_group_id: "group_cleanup",
-      trial_index: 0
+      trial_index: 0,
+      expected_lineage: expectedLineage(loadedManifest)
     });
     expect((await orchestrator.execute(run.run_id)).status).toBe("victory");
     const workspace = path.join(workspaceRoot, run.run_id);
@@ -548,7 +587,8 @@ describe("RunOrchestrator", () => {
       manifest_id: loadedManifest.manifest.id,
       snapshot_hash: snapshot.source_hash,
       run_group_id: "group_collision",
-      trial_index: 0
+      trial_index: 0,
+      expected_lineage: expectedLineage(loadedManifest)
     };
     const first = await orchestrator.createRun(request);
     const second = await orchestrator.createRun({ ...request, trial_index: 1 });

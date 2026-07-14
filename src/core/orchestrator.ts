@@ -43,6 +43,15 @@ import {
   type VerdictBundle
 } from "../protocol/index.js";
 import { EventBus } from "./events.js";
+import {
+  validateSnapshotIdentity
+} from "./snapshot-identity.js";
+
+export interface ExpectedRunLineage {
+  readonly manifest_hash: RunEnvelope["manifest_hash"];
+  readonly fixture_hash: RunEnvelope["fixture_hash"];
+  readonly runner: RunEnvelope["runner"];
+}
 
 export interface CreateRunRequest {
   readonly manifest_id: string;
@@ -50,6 +59,7 @@ export interface CreateRunRequest {
   readonly run_group_id: string;
   readonly trial_index: number;
   readonly parent_run_id?: string;
+  readonly expected_lineage: ExpectedRunLineage;
 }
 
 export interface RunOrchestratorOptions {
@@ -74,6 +84,12 @@ interface RunContext {
   snapshotExecutionFingerprint: string;
   workspace?: OwnedDirectory;
   workspaceCleaned?: boolean;
+}
+
+export interface LockedRunContext {
+  readonly envelope: RunEnvelope;
+  readonly manifest_id: string;
+  readonly snapshot_execution_fingerprint: string;
 }
 
 interface OwnedDirectory {
@@ -324,28 +340,11 @@ function effectiveScopeResult(results: readonly VerifierResult[]): VerifierResul
   };
 }
 
-function snapshotIdentity(snapshot: SkillSnapshot): string {
-  return sha256(canonicalJson({ source: snapshot.source, files: snapshot.files }));
-}
-
-function snapshotExecutionFingerprint(snapshot: SkillSnapshot): string {
-  return sha256(canonicalJson({
-    source: snapshot.source,
-    source_hash: snapshot.source_hash,
-    entrypoint: snapshot.entrypoint,
-    files: snapshot.files,
-    imported_path: snapshot.imported_path
-  }));
-}
-
 async function copySnapshot(snapshotValue: SkillSnapshot, workspace: string): Promise<{
   entrypoint: string;
   infrastructureRoot: OwnedDirectory;
 }> {
-  const snapshot = SkillSnapshotSchema.parse(snapshotValue);
-  if (snapshotIdentity(snapshot) !== snapshot.source_hash) {
-    throw new Error("Snapshot hash does not match its immutable identity");
-  }
+  const { snapshot } = validateSnapshotIdentity(snapshotValue);
   const root = path.resolve(snapshot.imported_path);
   const rootStats = await lstat(root);
   if (!rootStats.isDirectory() || rootStats.isSymbolicLink() || await realpath(root) !== root) {
@@ -420,12 +419,17 @@ export class RunOrchestrator {
       || loaded.hash !== sha256(canonicalJson(manifest))) {
       throw new Error("Manifest provider returned a mismatched immutable manifest");
     }
-    const snapshot = SkillSnapshotSchema.parse(
-      await this.#options.loadSnapshot(request.snapshot_hash)
+    const validatedSnapshot = validateSnapshotIdentity(
+      await this.#options.loadSnapshot(request.snapshot_hash),
+      { expected_source_hash: request.snapshot_hash }
     );
-    if (snapshot.source_hash !== request.snapshot_hash
-      || snapshotIdentity(snapshot) !== request.snapshot_hash) {
-      throw new Error("Snapshot provider returned a mismatched immutable snapshot");
+    const snapshot = validatedSnapshot.snapshot;
+    const fixtureHash = sha256(canonicalJson(manifest.fixture));
+    const runner = { adapter: "codex-cli" as const, model: "gpt-5.6" as const };
+    if (request.expected_lineage.manifest_hash !== loaded.hash
+      || request.expected_lineage.fixture_hash !== fixtureHash
+      || canonicalJson(request.expected_lineage.runner) !== canonicalJson(runner)) {
+      throw new Error("Run expected lineage does not match loaded immutable inputs");
     }
     for (let attempt = 0; attempt < 16; attempt += 1) {
       const token = this.#options.idFactory?.() ?? randomUUID();
@@ -439,8 +443,8 @@ export class RunOrchestrator {
         ...(request.parent_run_id === undefined ? {} : { parent_run_id: request.parent_run_id }),
         manifest_hash: loaded.hash,
         snapshot_hash: snapshot.source_hash,
-        fixture_hash: sha256(canonicalJson(manifest.fixture)),
-        runner: { adapter: "codex-cli", model: "gpt-5.6" },
+        fixture_hash: fixtureHash,
+        runner,
         state: "created",
         started_at: (this.#options.now?.() ?? new Date()).toISOString()
       });
@@ -449,7 +453,7 @@ export class RunOrchestrator {
         this.#runs.set(runId, {
           envelope,
           manifestId: manifest.id,
-          snapshotExecutionFingerprint: snapshotExecutionFingerprint(snapshot)
+          snapshotExecutionFingerprint: validatedSnapshot.execution_fingerprint
         });
         return envelope;
       } catch (error) {
@@ -457,6 +461,19 @@ export class RunOrchestrator {
       }
     }
     throw new Error("Unable to allocate a collision-free run id");
+  }
+
+  getRunContext(runId: string): LockedRunContext {
+    const context = this.#runs.get(runId);
+    if (context === undefined) throw new Error(`Unknown run context: ${runId}`);
+    return {
+      envelope: RunEnvelopeSchema.parse({
+        ...context.envelope,
+        runner: { ...context.envelope.runner }
+      }),
+      manifest_id: context.manifestId,
+      snapshot_execution_fingerprint: context.snapshotExecutionFingerprint
+    };
   }
 
   /**
@@ -567,9 +584,12 @@ export class RunOrchestrator {
       || loaded.hash !== sha256(canonicalJson(manifest))) {
       throw new Error("Manifest provider drifted after run creation");
     }
-    if (snapshot.source_hash !== context.envelope.snapshot_hash
-      || snapshotIdentity(snapshot) !== context.envelope.snapshot_hash
-      || snapshotExecutionFingerprint(snapshot) !== context.snapshotExecutionFingerprint) {
+    try {
+      validateSnapshotIdentity(snapshot, {
+        expected_source_hash: context.envelope.snapshot_hash,
+        expected_execution_fingerprint: context.snapshotExecutionFingerprint
+      });
+    } catch {
       throw new Error("Snapshot provider drifted after run creation");
     }
     let nextSeq = 0;

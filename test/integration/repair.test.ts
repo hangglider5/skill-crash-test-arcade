@@ -15,6 +15,10 @@ import type {
 import { RunDiagnosisService } from "../../src/core/diagnosis.js";
 import { importSkill } from "../../src/core/importer.js";
 import { RepairCoordinator } from "../../src/core/repair.js";
+import {
+  computeSnapshotExecutionFingerprint,
+  computeSnapshotSourceHash
+} from "../../src/core/snapshot-identity.js";
 import type { AgentRunInput, AgentRunner } from "../../src/codex/types.js";
 import type {
   RunEnvelope,
@@ -53,14 +57,14 @@ async function temporaryRoot(): Promise<string> {
   return root;
 }
 
-function envelope(runId = "run_baseline"): RunEnvelope {
+function envelope(runId = "run_baseline", snapshotHash = hashB): RunEnvelope {
   return {
     schema: "arena.run/v1",
     run_id: runId,
     run_group_id: "group_01",
     trial_index: 0,
     manifest_hash: hashA,
-    snapshot_hash: hashB,
+    snapshot_hash: snapshotHash,
     fixture_hash: hashC,
     runner: { adapter: "codex-cli", model: "gpt-5.6" },
     state: "completed",
@@ -102,15 +106,16 @@ function verdict(): VerdictBundle {
 }
 
 function snapshot(importedPath: string): SkillSnapshot {
-  return {
-    schema: "arena.skill-snapshot/v1",
-    source: { kind: "local", uri: "redacted:source" },
+  const candidate = {
+    schema: "arena.skill-snapshot/v1" as const,
+    source: { kind: "local" as const, uri: "redacted:source" },
     entrypoint: "SKILL.md",
     license: "MIT",
     files: [{ path: "SKILL.md", bytes: 10, sha256: hashA }],
-    source_hash: hashB,
+    source_hash: "",
     imported_path: importedPath
   };
+  return { ...candidate, source_hash: computeSnapshotSourceHash(candidate) };
 }
 
 afterEach(async () => {
@@ -125,7 +130,8 @@ afterEach(async () => {
 async function fixture(modelOutput: unknown) {
   const root = await temporaryRoot();
   const runStore = new RunStore(path.join(root, "runs"));
-  const baseline = envelope();
+  const lockedSnapshot = snapshot("/private/secret/source");
+  const baseline = envelope("run_baseline", lockedSnapshot.source_hash);
   const lockedVerdict = verdict();
   await runStore.create(baseline);
   await runStore.appendEvent(baseline.run_id, event(0));
@@ -138,10 +144,16 @@ async function fixture(modelOutput: unknown) {
     runStore,
     model,
     async loadRunContext() {
-      return { envelope: baseline, manifest_id: "repo-false-green-v1" };
+      return {
+        envelope: baseline,
+        manifest_id: "repo-false-green-v1",
+        snapshot_execution_fingerprint: computeSnapshotExecutionFingerprint(
+          lockedSnapshot
+        )
+      };
     },
     async loadVerdict() { return lockedVerdict; },
-    async loadSnapshot() { return snapshot("/private/secret/source"); },
+    async loadSnapshot() { return lockedSnapshot; },
     async loadArtifactSummary(ref) {
       return { ref, mime: "text/plain", bytes: 12, redacted: true };
     },
@@ -199,6 +211,7 @@ describe("RunDiagnosisService", () => {
 
   it("revalidates a StructuredModel result that bypasses the supplied parser", async () => {
     const fixtureValue = await fixture({});
+    const lockedSnapshot = snapshot("/private/secret/source");
     const bypass = new BypassModel({
       schema: "arena.diagnosis/v1", run_id: "run_baseline", model: "gpt-5.6",
       observed_failure: "Failure", likely_skill_gap: "Gap", retry_analysis: "Retry",
@@ -207,15 +220,55 @@ describe("RunDiagnosisService", () => {
     const service = new RunDiagnosisService({
       runStore: fixtureValue.runStore,
       model: bypass,
-      async loadRunContext() { return { envelope: envelope(), manifest_id: "repo-false-green-v1" }; },
+      async loadRunContext() {
+        return {
+          envelope: envelope("run_baseline", lockedSnapshot.source_hash),
+          manifest_id: "repo-false-green-v1",
+          snapshot_execution_fingerprint: computeSnapshotExecutionFingerprint(
+            lockedSnapshot
+          )
+        };
+      },
       async loadVerdict() { return verdict(); },
-      async loadSnapshot() { return snapshot("/private/secret/source"); },
+      async loadSnapshot() { return lockedSnapshot; },
       async loadArtifactSummary(ref) { return { ref, mime: "text/plain", bytes: 12, redacted: true }; },
       modelCwd: fixtureValue.root,
       timeoutMs: 5_000
     });
     await expect(service.diagnoseRun("run_baseline"))
       .rejects.toThrow("Diagnosis references unavailable evidence: event:999");
+  });
+
+  it("rejects entrypoint-only snapshot drift before invoking the model", async () => {
+    const fixtureValue = await fixture({});
+    const lockedSnapshot = snapshot("/private/secret/source");
+    const model = new CapturingModel({});
+    const service = new RunDiagnosisService({
+      runStore: fixtureValue.runStore,
+      model,
+      async loadRunContext() {
+        return {
+          envelope: envelope("run_baseline", lockedSnapshot.source_hash),
+          manifest_id: "repo-false-green-v1",
+          snapshot_execution_fingerprint: computeSnapshotExecutionFingerprint(
+            lockedSnapshot
+          )
+        };
+      },
+      async loadVerdict() { return verdict(); },
+      async loadSnapshot() {
+        return { ...lockedSnapshot, entrypoint: "nested/SKILL.md" };
+      },
+      async loadArtifactSummary(ref) {
+        return { ref, mime: "text/plain", bytes: 12, redacted: true };
+      },
+      modelCwd: fixtureValue.root,
+      timeoutMs: 5_000
+    });
+
+    await expect(service.diagnoseRun("run_baseline"))
+      .rejects.toThrow("Snapshot execution fingerprint");
+    expect(model.request).toBeUndefined();
   });
 });
 
@@ -236,7 +289,13 @@ class EditingRunner implements AgentRunner {
   }
 }
 
-async function repairFixture(edit: (cwd: string) => Promise<void>) {
+async function repairFixture(
+  edit: (cwd: string) => Promise<void>,
+  options: {
+    readonly fixedRepairedSnapshot?: boolean;
+    readonly loadSnapshotTransform?: (snapshot: SkillSnapshot) => SkillSnapshot;
+  } = {}
+) {
   const root = await temporaryRoot();
   const source = path.join(root, "source-skill");
   await mkdir(source);
@@ -269,7 +328,8 @@ async function repairFixture(edit: (cwd: string) => Promise<void>) {
   await mkdir(runnerOutputRoot, { mode: 0o700 });
   const collisionSentinel = path.join(runnerOutputRoot, "repair-collision1.schema.json");
   await writeFile(collisionSentinel, "sentinel", { mode: 0o600 });
-  const outputIds = ["collision1", "safe0001"];
+  const outputIds = ["collision1", "safe0001", "safe0002", "safe0003"];
+  const repairIds = ["repair_01", "repair_02"];
   const runner = new EditingRunner(edit, runnerOutputRoot);
   const childRequests: Array<{
     manifest_id: string;
@@ -277,7 +337,13 @@ async function repairFixture(edit: (cwd: string) => Promise<void>) {
     run_group_id: string;
     trial_index: number;
     parent_run_id?: string;
+    expected_lineage: {
+      manifest_hash: string;
+      fixture_hash: string;
+      runner: RunEnvelope["runner"];
+    };
   }> = [];
+  const createdChildren: RunEnvelope[] = [];
   const executed: string[] = [];
   const coordinator = new RepairCoordinator({
     runStore,
@@ -288,28 +354,50 @@ async function repairFixture(edit: (cwd: string) => Promise<void>) {
     runnerOutputRoot,
     toolPath: [path.dirname(process.execPath), "/usr/bin", "/bin"].join(path.delimiter),
     timeoutMs: 5_000,
-    idFactory: () => "repair_01",
+    idFactory: () => repairIds.shift()!,
     outputIdFactory: () => outputIds.shift()!,
     async loadRunContext() {
-      return { envelope: baseline, manifest_id: "repo-false-green-v1" };
+      return {
+        envelope: baseline,
+        manifest_id: "repo-false-green-v1",
+        snapshot_execution_fingerprint: computeSnapshotExecutionFingerprint(original)
+      };
     },
-    async loadSnapshot() { return original; },
+    async loadSnapshot() {
+      return options.loadSnapshotTransform?.(original) ?? original;
+    },
     async loadVerdict() { return verdict(); },
     async loadDiagnosis() { return lockedDiagnosis; },
     async createChildRun(request) {
       childRequests.push(request);
-      return {
+      const child: RunEnvelope = {
         ...baseline,
-        run_id: "run_child",
+        run_id: createdChildren.length === 0 ? "run_child" : `run_child_${createdChildren.length + 1}`,
         parent_run_id: baseline.run_id,
         snapshot_hash: request.snapshot_hash,
         trial_index: request.trial_index,
         state: "created",
         ended_at: undefined
       };
+      createdChildren.push(child);
+      return child;
     },
     async executeChildRun(runId) { executed.push(runId); },
-    async listRunsForGroup() { return [baseline]; }
+    async listRunsForGroup() { return [baseline, ...createdChildren]; },
+    ...(options.fixedRepairedSnapshot
+      ? {
+          async importRepairedSnapshot() {
+            const candidate = {
+              ...original,
+              source: { kind: "local" as const, uri: "repair:stable" }
+            };
+            return {
+              ...candidate,
+              source_hash: computeSnapshotSourceHash(candidate)
+            };
+          }
+        }
+      : {})
   });
   return {
     root, original, baseline, coordinator, runner, artifactStore,
@@ -327,6 +415,7 @@ describe("RepairCoordinator", () => {
     const proposal = await fixture.coordinator.createRepairFork("run_baseline");
 
     expect(proposal.changed_paths).toEqual(["SKILL.md"]);
+    expect(proposal).not.toHaveProperty("fork_path");
     expect(await readFile(path.join(fixture.original.imported_path, "SKILL.md"), "utf8"))
       .toBe(originalBefore);
     expect(fixture.runner.input).toMatchObject({
@@ -340,7 +429,7 @@ describe("RepairCoordinator", () => {
     expect(fixture.runner.input?.tool_env?.PATH).toBeDefined();
     expect(fixture.runner.input?.tool_env).not.toHaveProperty("OPENAI_API_KEY");
     expect(await readFile(fixture.collisionSentinel, "utf8")).toBe("sentinel");
-    await expect(exec("git", ["-C", proposal.fork_path, "rev-parse", "--verify", "HEAD"]))
+    await expect(exec("git", ["-C", fixture.runner.input!.cwd, "rev-parse", "--verify", "HEAD"]))
       .rejects.toThrow();
     expect((await fixture.artifactStore.read(proposal.patch_ref)).toString())
       .toContain("Run the protected full suite");
@@ -377,7 +466,7 @@ describe("RepairCoordinator", () => {
       await writeFile(path.join(cwd, "SKILL.md"), "# Reviewed repair\n");
     });
     const proposal = await fixture.coordinator.createRepairFork("run_baseline");
-    await writeFile(path.join(proposal.fork_path, "SKILL.md"), "# Tampered after review\n");
+    await writeFile(path.join(fixture.runner.input!.cwd, "SKILL.md"), "# Tampered after review\n");
 
     await expect(fixture.coordinator.approveAndRerun(proposal.repair_id))
       .rejects.toThrow(/changed after review|reviewed repair/u);
@@ -388,12 +477,49 @@ describe("RepairCoordinator", () => {
     expect(JSON.stringify(record)).not.toContain(fixture.root);
   });
 
+  it("allocates distinct trials for concurrent approvals of the same repaired snapshot", async () => {
+    const fixture = await repairFixture(async (cwd) => {
+      await writeFile(path.join(cwd, "SKILL.md"), "# Stable repaired Skill\n");
+    }, { fixedRepairedSnapshot: true });
+    const first = await fixture.coordinator.createRepairFork("run_baseline");
+    const second = await fixture.coordinator.createRepairFork("run_baseline");
+
+    await Promise.all([
+      fixture.coordinator.approveAndRerun(first.repair_id),
+      fixture.coordinator.approveAndRerun(second.repair_id)
+    ]);
+
+    expect(fixture.childRequests.map(({ trial_index }) => trial_index).sort())
+      .toEqual([0, 1]);
+    expect(new Set(fixture.childRequests.map(({ snapshot_hash }) => snapshot_hash)).size)
+      .toBe(1);
+  });
+
   it("allows an existing Markdown file explicitly linked by the entrypoint", async () => {
     const fixture = await repairFixture(async (cwd) => {
       await writeFile(path.join(cwd, "guide.md"), "# Guide\n\nRun the full suite.\n");
     });
     await expect(fixture.coordinator.createRepairFork("run_baseline"))
       .resolves.toMatchObject({ changed_paths: ["guide.md"] });
+  });
+
+  it("rejects forged source and files under a stale source hash before running repair", async () => {
+    const fixture = await repairFixture(async () => undefined, {
+      loadSnapshotTransform(original) {
+        return {
+          ...original,
+          source: { kind: "local", uri: "redacted:forged" },
+          files: original.files.map((record) => ({
+            ...record,
+            sha256: record.sha256 === hashA ? hashB : hashA
+          }))
+        };
+      }
+    });
+
+    await expect(fixture.coordinator.createRepairFork("run_baseline"))
+      .rejects.toThrow("Snapshot source identity");
+    expect(fixture.runner.input).toBeUndefined();
   });
 
   it.each([
@@ -416,7 +542,15 @@ describe("RepairCoordinator", () => {
     }]
   ])("rejects %s repair mutations", async (_name, edit) => {
     const fixture = await repairFixture(edit);
-    await expect(fixture.coordinator.createRepairFork("run_baseline"))
-      .rejects.toThrow(/repair mutation|allowed path|symbolic link|empty patch|unchanged-mode|size limit/iu);
+    let failure: unknown;
+    try {
+      await fixture.coordinator.createRepairFork("run_baseline");
+    } catch (error) {
+      failure = error;
+    }
+    expect(failure).toBeInstanceOf(Error);
+    const message = (failure as Error).message;
+    expect(message).toMatch(/repair mutation|allowed path|symbolic link|empty patch|unchanged-mode|size limit/iu);
+    expect(message).not.toContain(fixture.root);
   });
 });

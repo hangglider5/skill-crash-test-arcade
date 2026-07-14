@@ -20,7 +20,6 @@ import type { AgentRunner } from "../codex/types.js";
 import {
   DiagnosisSchema,
   RunEnvelopeSchema,
-  SkillSnapshotSchema,
   VerdictBundleSchema,
   canonicalJson,
   sha256,
@@ -35,6 +34,9 @@ import { z } from "zod";
 import { importSkill } from "./importer.js";
 import type { CreateRunRequest } from "./orchestrator.js";
 import type { RunDiagnosisService } from "./diagnosis.js";
+import {
+  validateSnapshotIdentity
+} from "./snapshot-identity.js";
 
 const RepairOutputSchema = z.object({ summary: z.string().min(1).max(4_096) }).strict();
 const RepairOutputJsonSchema = z.toJSONSchema(RepairOutputSchema, { target: "draft-2020-12" });
@@ -52,11 +54,13 @@ export interface RepairProposal {
   readonly created_at: string;
   readonly changed_paths: readonly string[];
   readonly patch_ref: ArtifactRef;
-  /** Process-local review path; never persisted in repair.json. */
-  readonly fork_path: string;
 }
 
-interface RepairRunContext { readonly envelope: RunEnvelope; readonly manifest_id: string }
+interface RepairRunContext {
+  readonly envelope: RunEnvelope;
+  readonly manifest_id: string;
+  readonly snapshot_execution_fingerprint: string;
+}
 
 export interface RepairCoordinatorOptions {
   readonly runStore: RunStore;
@@ -75,6 +79,10 @@ export interface RepairCoordinatorOptions {
   readonly loadVerdict: (runId: string) => Promise<VerdictBundle>;
   readonly loadSnapshot: (snapshotHash: string) => Promise<SkillSnapshot>;
   readonly loadDiagnosis: (runId: string) => Promise<Diagnosis>;
+  readonly importRepairedSnapshot?: (
+    sourcePath: string,
+    original: SkillSnapshot
+  ) => Promise<SkillSnapshot>;
   readonly listRunsForGroup: (runGroupId: string) => Promise<readonly RunEnvelope[]>;
   readonly createChildRun: (request: CreateRunRequest) => Promise<RunEnvelope>;
   readonly executeChildRun: (runId: string) => Promise<unknown>;
@@ -91,6 +99,8 @@ interface PendingRepair {
   readonly trustedGitIdentity: Identity;
   readonly trustedGitInventory: ReadonlyMap<string, InventoryEntry>;
   readonly patchDigest: string;
+  readonly sourcePath: string;
+  readonly snapshotExecutionFingerprint: string;
   state: "pending" | "approving" | "approved" | "failed";
 }
 
@@ -117,7 +127,9 @@ async function privateRoot(configured: string): Promise<string> {
 
 async function stableBytes(filePath: string): Promise<{ bytes: Buffer; mode: number }> {
   const before = await lstat(filePath);
-  if (!before.isFile() || before.isSymbolicLink() || before.nlink !== 1) throw new Error(`Snapshot path is not a regular file: ${filePath}`);
+  if (!before.isFile() || before.isSymbolicLink() || before.nlink !== 1) {
+    throw new Error("Snapshot path is not a regular file");
+  }
   if (!Number.isSafeInteger(before.size) || before.size < 0 || before.size > MAX_REPAIR_FILE_BYTES) {
     throw new Error("Repair file exceeds the size limit");
   }
@@ -125,12 +137,12 @@ async function stableBytes(filePath: string): Promise<{ bytes: Buffer; mode: num
   try {
     const opened = await handle.stat();
     if (!opened.isFile() || opened.nlink !== 1 || opened.dev !== before.dev || opened.ino !== before.ino || opened.size !== before.size) {
-      throw new Error(`Snapshot file identity changed: ${filePath}`);
+      throw new Error("Snapshot file identity changed");
     }
     const bytes = await handle.readFile();
     const after = await handle.stat();
     if (after.dev !== opened.dev || after.ino !== opened.ino || after.size !== opened.size || bytes.byteLength !== opened.size) {
-      throw new Error(`Snapshot file identity changed: ${filePath}`);
+      throw new Error("Snapshot file identity changed");
     }
     return { bytes, mode: opened.mode & 0o777 };
   } finally { await handle.close(); }
@@ -202,13 +214,15 @@ async function inventory(root: string): Promise<Map<string, InventoryEntry>> {
 async function directoryIdentity(directory: string, parent: string): Promise<Identity> {
   const stats = await lstat(directory);
   if (!stats.isDirectory() || stats.isSymbolicLink() || path.dirname(directory) !== parent
-    || await realpath(directory) !== directory) throw new Error(`Owned directory identity is invalid: ${directory}`);
+    || await realpath(directory) !== directory) throw new Error("Owned directory identity is invalid");
   return { path: directory, dev: stats.dev, ino: stats.ino };
 }
 
 async function assertDirectoryIdentity(identity: Identity, parent: string): Promise<void> {
   const current = await directoryIdentity(identity.path, parent);
-  if (current.dev !== identity.dev || current.ino !== identity.ino) throw new Error(`Owned directory identity changed: ${identity.path}`);
+  if (current.dev !== identity.dev || current.ino !== identity.ino) {
+    throw new Error("Owned directory identity changed");
+  }
 }
 
 function assertInventory(
@@ -263,7 +277,8 @@ async function trustedGit(input: {
     if (result.exit_code !== 0) throw new Error("nonzero Git exit");
     return result.stdout;
   } catch (error) {
-    throw new Error("Trusted Git command failed", { cause: error });
+    void error;
+    throw new Error("Trusted Git command failed");
   }
 }
 
@@ -323,6 +338,7 @@ async function allocateRunnerOutput(
 export class RepairCoordinator {
   readonly #options: RepairCoordinatorOptions;
   readonly #repairs = new Map<string, PendingRepair>();
+  readonly #trialLocks = new Map<string, Promise<void>>();
   constructor(options: RepairCoordinatorOptions) {
     validateToolPath(options.toolPath);
     this.#options = options;
@@ -340,8 +356,14 @@ export class RepairCoordinator {
     if (baseline.run_id !== runId || baseline.state !== "completed" || context.manifest_id.length === 0 || verdict.run_id !== runId || verdict.status !== "defeat") {
       throw new Error("Repair requires a terminal locked defeat with matching run context");
     }
-    const snapshot = SkillSnapshotSchema.parse(await this.#options.loadSnapshot(baseline.snapshot_hash));
-    if (snapshot.source_hash !== baseline.snapshot_hash) throw new Error("Repair snapshot does not match the locked run");
+    const validatedSnapshot = validateSnapshotIdentity(
+      await this.#options.loadSnapshot(baseline.snapshot_hash),
+      {
+        expected_source_hash: baseline.snapshot_hash,
+        expected_execution_fingerprint: context.snapshot_execution_fingerprint
+      }
+    );
+    const snapshot = validatedSnapshot.snapshot;
     const diagnosis = DiagnosisSchema.parse(await this.#options.loadDiagnosis(runId));
     if (diagnosis.run_id !== runId) throw new Error("Repair diagnosis does not match the requested run");
     const trace = await this.#options.runStore.readEvents(runId);
@@ -419,7 +441,15 @@ export class RepairCoordinator {
     await writeFile(path.join(repairDirectory, "repair.patch"), patch, { flag: "wx", mode: 0o600 });
     const artifact = await this.#options.artifactStore.put(Buffer.from(patch), { mime: "text/x-diff", redacted: true });
     const createdAt = (this.#options.now?.() ?? new Date()).toISOString();
-    const proposal: RepairProposal = { repair_id: repairId, run_id: runId, status: "pending", snapshot_hash: baseline.snapshot_hash, created_at: createdAt, changed_paths: changedPaths, patch_ref: artifact.ref, fork_path: source };
+    const proposal: RepairProposal = {
+      repair_id: repairId,
+      run_id: runId,
+      status: "pending",
+      snapshot_hash: baseline.snapshot_hash,
+      created_at: createdAt,
+      changed_paths: changedPaths,
+      patch_ref: artifact.ref
+    };
     await verifySnapshot(snapshot, originalModes);
     await this.#options.runStore.writeRecord(runId, "repair.json", { schema: "arena.repair/v1", repair_id: repairId, run_id: runId, status: "pending", snapshot_hash: baseline.snapshot_hash, created_at: createdAt, changed_paths: changedPaths, patch_ref: artifact.ref });
     this.#repairs.set(repairId, {
@@ -429,6 +459,8 @@ export class RepairCoordinator {
       trustedGitIdentity,
       trustedGitInventory: await inventory(trustedGitPath),
       patchDigest: sha256(patch),
+      sourcePath: source,
+      snapshotExecutionFingerprint: validatedSnapshot.execution_fingerprint,
       state: "pending"
     });
     return proposal;
@@ -443,9 +475,10 @@ export class RepairCoordinator {
       if (!directory.isDirectory() || directory.isSymbolicLink() || directory.dev !== repair.ownedDirectory.dev || directory.ino !== repair.ownedDirectory.ino) throw new Error("Repair fork identity changed");
       await assertDirectoryIdentity(repair.ownedSource, repair.ownedDirectory.path);
       try {
-        assertInventory(repair.reviewedInventory, await inventory(repair.proposal.fork_path), new Set());
+        assertInventory(repair.reviewedInventory, await inventory(repair.sourcePath), new Set());
       } catch (error) {
-        throw new Error("Repair changed after review", { cause: error });
+        void error;
+        throw new Error("Repair changed after review");
       }
       await assertDirectoryIdentity(repair.trustedGitIdentity, repair.ownedDirectory.path);
       assertInventory(
@@ -455,7 +488,7 @@ export class RepairCoordinator {
       );
       const approvalPatch = await trustedGit({
         gitDirectory: repair.trustedGitIdentity.path,
-        source: repair.proposal.fork_path,
+        source: repair.sourcePath,
         env: localGitEnvironment(
           this.#options.toolPath,
           path.join(repair.ownedDirectory.path, "home"),
@@ -472,17 +505,61 @@ export class RepairCoordinator {
       }
       const context = await this.#options.loadRunContext(repair.baseline.run_id);
       const verdict = VerdictBundleSchema.parse(await this.#options.loadVerdict(repair.baseline.run_id));
-      if (canonicalJson(RunEnvelopeSchema.parse(context.envelope)) !== canonicalJson(repair.baseline) || context.manifest_id !== repair.manifestId || verdict.status !== "defeat") throw new Error("Baseline lineage changed before approval");
-      const original = SkillSnapshotSchema.parse(await this.#options.loadSnapshot(repair.baseline.snapshot_hash));
+      if (canonicalJson(RunEnvelopeSchema.parse(context.envelope)) !== canonicalJson(repair.baseline)
+        || context.manifest_id !== repair.manifestId
+        || context.snapshot_execution_fingerprint !== repair.snapshotExecutionFingerprint
+        || verdict.status !== "defeat") {
+        throw new Error("Baseline lineage changed before approval");
+      }
+      const original = validateSnapshotIdentity(
+        await this.#options.loadSnapshot(repair.baseline.snapshot_hash),
+        {
+          expected_source_hash: repair.baseline.snapshot_hash,
+          expected_execution_fingerprint: repair.snapshotExecutionFingerprint
+        }
+      ).snapshot;
       await verifySnapshot(original, repair.originalModes);
-      const repaired = await importSkill({ kind: "local", path: repair.proposal.fork_path, entrypoint: original.entrypoint }, this.#options.importsRoot);
+      const repairedValue = this.#options.importRepairedSnapshot === undefined
+        ? await importSkill({
+            kind: "local",
+            path: repair.sourcePath,
+            entrypoint: original.entrypoint
+          }, this.#options.importsRoot)
+        : await this.#options.importRepairedSnapshot(repair.sourcePath, original);
+      const repaired = validateSnapshotIdentity(repairedValue).snapshot;
       await verifySnapshot(original, repair.originalModes);
       if (repaired.source_hash === repair.baseline.snapshot_hash) throw new Error("Approved repair did not create a new snapshot");
-      const existing = (await this.#options.listRunsForGroup(repair.baseline.run_group_id))
-        .map((run) => RunEnvelopeSchema.parse(run));
-      const trialIndex = existing.filter((run) => run.run_group_id === repair.baseline.run_group_id && run.snapshot_hash === repaired.source_hash).reduce((max, run) => Math.max(max, run.trial_index), -1) + 1;
-      const child = RunEnvelopeSchema.parse(await this.#options.createChildRun({ manifest_id: repair.manifestId, snapshot_hash: repaired.source_hash, run_group_id: repair.baseline.run_group_id, trial_index: trialIndex, parent_run_id: repair.baseline.run_id }));
-      if (child.parent_run_id !== repair.baseline.run_id || child.manifest_hash !== repair.baseline.manifest_hash || child.fixture_hash !== repair.baseline.fixture_hash || child.run_group_id !== repair.baseline.run_group_id || child.snapshot_hash !== repaired.source_hash || child.trial_index !== trialIndex || canonicalJson(child.runner) !== canonicalJson(repair.baseline.runner)) throw new Error("Child run lineage does not match the approved repair");
+      const allocationKey = `${repair.baseline.run_group_id}\0${repaired.source_hash}`;
+      const child = await this.#withTrialLock(allocationKey, async () => {
+        const existing = (await this.#options.listRunsForGroup(repair.baseline.run_group_id))
+          .map((run) => RunEnvelopeSchema.parse(run));
+        const trialIndex = existing
+          .filter((run) => run.run_group_id === repair.baseline.run_group_id
+            && run.snapshot_hash === repaired.source_hash)
+          .reduce((max, run) => Math.max(max, run.trial_index), -1) + 1;
+        const created = RunEnvelopeSchema.parse(await this.#options.createChildRun({
+          manifest_id: repair.manifestId,
+          snapshot_hash: repaired.source_hash,
+          run_group_id: repair.baseline.run_group_id,
+          trial_index: trialIndex,
+          parent_run_id: repair.baseline.run_id,
+          expected_lineage: {
+            manifest_hash: repair.baseline.manifest_hash,
+            fixture_hash: repair.baseline.fixture_hash,
+            runner: repair.baseline.runner
+          }
+        }));
+        if (created.parent_run_id !== repair.baseline.run_id
+          || created.manifest_hash !== repair.baseline.manifest_hash
+          || created.fixture_hash !== repair.baseline.fixture_hash
+          || created.run_group_id !== repair.baseline.run_group_id
+          || created.snapshot_hash !== repaired.source_hash
+          || created.trial_index !== trialIndex
+          || canonicalJson(created.runner) !== canonicalJson(repair.baseline.runner)) {
+          throw new Error("Child run lineage does not match the approved repair");
+        }
+        return created;
+      });
       await this.#options.executeChildRun(child.run_id);
       await verifySnapshot(original, repair.originalModes);
       await this.#options.runStore.writeRecord(repair.baseline.run_id, "repair.json", {
@@ -504,6 +581,18 @@ export class RepairCoordinator {
         error: { code: "REPAIR_APPROVAL_FAILED" }
       });
       throw error;
+    }
+  }
+
+  async #withTrialLock<T>(key: string, operation: () => Promise<T>): Promise<T> {
+    const previous = this.#trialLocks.get(key) ?? Promise.resolve();
+    const result = previous.then(operation, operation);
+    const tail = result.then(() => undefined, () => undefined);
+    this.#trialLocks.set(key, tail);
+    try {
+      return await result;
+    } finally {
+      if (this.#trialLocks.get(key) === tail) this.#trialLocks.delete(key);
     }
   }
 }

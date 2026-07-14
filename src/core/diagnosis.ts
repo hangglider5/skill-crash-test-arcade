@@ -7,7 +7,6 @@ import {
   DiagnosisJsonSchema,
   DiagnosisSchema,
   RunEnvelopeSchema,
-  SkillSnapshotSchema,
   VerdictBundleSchema,
   canonicalJson,
   type ArtifactRef,
@@ -17,6 +16,7 @@ import {
   type SkillSnapshot,
   type VerdictBundle
 } from "../protocol/index.js";
+import { validateSnapshotIdentity } from "./snapshot-identity.js";
 
 const MAX_SELECTED_EVENTS = 128;
 const MAX_ARTIFACT_SUMMARIES = 64;
@@ -34,6 +34,7 @@ export type ArtifactSummary = z.infer<typeof ArtifactSummarySchema>;
 export interface DiagnosisRunContext {
   readonly envelope: RunEnvelope;
   readonly manifest_id: string;
+  readonly snapshot_execution_fingerprint: string;
 }
 
 export interface RunDiagnosisServiceOptions {
@@ -88,12 +89,13 @@ export class RunDiagnosisService {
     if (verdict.run_id !== runId || verdict.status !== "defeat") {
       throw new Error("Diagnosis verdict does not match the requested run");
     }
-    const snapshot = SkillSnapshotSchema.parse(
-      await this.#options.loadSnapshot(envelope.snapshot_hash)
+    validateSnapshotIdentity(
+      await this.#options.loadSnapshot(envelope.snapshot_hash),
+      {
+        expected_source_hash: envelope.snapshot_hash,
+        expected_execution_fingerprint: context.snapshot_execution_fingerprint
+      }
     );
-    if (snapshot.source_hash !== envelope.snapshot_hash) {
-      throw new Error("Diagnosis snapshot does not match the locked run envelope");
-    }
 
     const trace = await this.#options.runStore.readEvents(runId);
     const evidence = verdictEvidence(verdict);
