@@ -118,10 +118,13 @@ export class RunStore {
 
       await this.#assertRunDirectory(root, runDirectory);
       const tracePath = directChild(runDirectory, "trace.jsonl");
-      await readRegularFile(tracePath);
+      const traceContents = await readRegularFile(tracePath);
+      const separator = traceContents.length > 0 && !traceContents.endsWith("\n")
+        ? "\n"
+        : "";
       await writeFile(
         tracePath,
-        `${canonicalJson(parsed)}\n`,
+        `${separator}${canonicalJson(parsed)}\n`,
         { flag: "a" }
       );
     });

@@ -12,7 +12,11 @@ import path from "node:path";
 
 import { afterEach, describe, expect, it } from "vitest";
 
-import type { RunEnvelope, TraceEvent } from "../../src/protocol/index.js";
+import {
+  canonicalJson,
+  type RunEnvelope,
+  type TraceEvent
+} from "../../src/protocol/index.js";
 import { RunStore } from "../../src/arena/run-store.js";
 
 const temporaryRoots: string[] = [];
@@ -177,6 +181,24 @@ describe("RunStore", () => {
     );
 
     await expect(store.readEvents("run_01")).rejects.toThrow(/empty line.*2/i);
+  });
+
+  it("separates an append from a valid Trace missing its terminal newline", async () => {
+    const root = await createTemporaryRoot("scta-runs-");
+    const store = new RunStore(root);
+    await store.create(validRunEnvelope("run_01"));
+    const tracePath = path.join(root, "run_01", "trace.jsonl");
+    const first = validEvent("run_01", 0);
+    const second = validEvent("run_01", 1);
+    const firstRecord = canonicalJson(first);
+    await writeFile(tracePath, firstRecord);
+
+    await store.appendEvent("run_01", second);
+
+    expect(await store.readEvents("run_01")).toEqual([first, second]);
+    expect(await readFile(tracePath, "utf8")).toBe(
+      `${firstRecord}\n${canonicalJson(second)}\n`
+    );
   });
 
   it("rejects a persisted sequence gap and does not extend the Trace", async () => {
