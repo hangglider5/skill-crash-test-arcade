@@ -1,6 +1,6 @@
 import { execFile } from "node:child_process";
 import { randomUUID } from "node:crypto";
-import { constants } from "node:fs";
+import { constants, type Stats } from "node:fs";
 import {
   chmod,
   lstat,
@@ -12,7 +12,8 @@ import {
   realpath,
   rename,
   rm,
-  writeFile
+  writeFile,
+  type FileHandle
 } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
@@ -47,6 +48,7 @@ export type ImportRequest =
 
 export type ImportInspectionErrorCode =
   | "SOURCE_UNAVAILABLE"
+  | "SOURCE_CHANGED"
   | "SYMLINK_REJECTED"
   | "NON_REGULAR_FILE"
   | "FILE_TOO_LARGE"
@@ -242,6 +244,58 @@ async function assertNoSymlinkDescendants(directory: string): Promise<void> {
   }
 }
 
+interface DescriptorReadFailure {
+  readonly code: ImportInspectionErrorCode;
+  readonly details?: Readonly<Record<string, unknown>>;
+}
+
+interface DescriptorReadPolicy {
+  readonly maxBytes: number;
+  readonly tooLarge: DescriptorReadFailure;
+  readonly changed: DescriptorReadFailure;
+  readonly validateSize?: (size: number) => void;
+}
+
+async function readStableDescriptor(
+  handle: FileHandle,
+  opened: Stats,
+  policy: DescriptorReadPolicy
+): Promise<Buffer> {
+  if (opened.size > policy.maxBytes) {
+    failure(policy.tooLarge.code, policy.tooLarge.details);
+  }
+  policy.validateSize?.(opened.size);
+  const data = Buffer.alloc(opened.size);
+  let offset = 0;
+  while (offset < data.byteLength) {
+    const { bytesRead } = await handle.read(data, offset, data.byteLength - offset, offset);
+    if (bytesRead === 0) {
+      failure(policy.changed.code, policy.changed.details);
+    }
+    offset += bytesRead;
+  }
+  const eofProbe = Buffer.alloc(1);
+  if ((await handle.read(eofProbe, 0, 1, opened.size)).bytesRead !== 0) {
+    failure(policy.changed.code, policy.changed.details);
+  }
+  const after = await handle.stat();
+  if (
+    !after.isFile()
+    || after.dev !== opened.dev
+    || after.ino !== opened.ino
+    || after.mode !== opened.mode
+    || after.nlink !== opened.nlink
+    || after.uid !== opened.uid
+    || after.gid !== opened.gid
+    || after.size !== opened.size
+    || after.mtimeMs !== opened.mtimeMs
+    || after.ctimeMs !== opened.ctimeMs
+  ) {
+    failure(policy.changed.code, policy.changed.details);
+  }
+  return data;
+}
+
 async function securelyReadFile(
   filePath: string,
   safePath: string,
@@ -263,41 +317,19 @@ async function securelyReadFile(
     ) {
       failure("SOURCE_UNAVAILABLE", { path: safePath });
     }
-    if (opened.size > MAX_FILE_BYTES) {
-      failure("FILE_TOO_LARGE", { path: safePath, limit_bytes: MAX_FILE_BYTES });
-    }
-    if (acceptedBytes + opened.size > MAX_IMPORT_BYTES) {
-      failure("IMPORT_TOO_LARGE", { limit_bytes: MAX_IMPORT_BYTES });
-    }
-    const data = Buffer.alloc(opened.size);
-    let offset = 0;
-    while (offset < data.byteLength) {
-      const { bytesRead } = await handle.read(data, offset, data.byteLength - offset, offset);
-      if (bytesRead === 0) {
-        failure("SOURCE_UNAVAILABLE", { path: safePath });
+    return await readStableDescriptor(handle, opened, {
+      maxBytes: MAX_FILE_BYTES,
+      tooLarge: {
+        code: "FILE_TOO_LARGE",
+        details: { path: safePath, limit_bytes: MAX_FILE_BYTES }
+      },
+      changed: { code: "SOURCE_UNAVAILABLE", details: { path: safePath } },
+      validateSize: (size) => {
+        if (acceptedBytes + size > MAX_IMPORT_BYTES) {
+          failure("IMPORT_TOO_LARGE", { limit_bytes: MAX_IMPORT_BYTES });
+        }
       }
-      offset += bytesRead;
-    }
-    const eofProbe = Buffer.alloc(1);
-    if ((await handle.read(eofProbe, 0, 1, opened.size)).bytesRead !== 0) {
-      failure("SOURCE_UNAVAILABLE", { path: safePath });
-    }
-    const after = await handle.stat();
-    if (
-      !after.isFile()
-      || after.dev !== opened.dev
-      || after.ino !== opened.ino
-      || after.mode !== opened.mode
-      || after.nlink !== opened.nlink
-      || after.uid !== opened.uid
-      || after.gid !== opened.gid
-      || after.size !== opened.size
-      || after.mtimeMs !== opened.mtimeMs
-      || after.ctimeMs !== opened.ctimeMs
-    ) {
-      failure("SOURCE_UNAVAILABLE", { path: safePath });
-    }
-    return data;
+    });
   } catch (error) {
     if (error instanceof ImportInspectionError) {
       throw error;
@@ -551,15 +583,14 @@ async function inspectZip(
     const opened = await handle.stat();
     if (
       !opened.isFile() || opened.dev !== archive.stats.dev || opened.ino !== archive.stats.ino
-      || opened.size > MAX_ARCHIVE_BYTES
     ) {
       failure("SOURCE_UNAVAILABLE");
     }
-    data = await handle.readFile();
-    const after = await handle.stat();
-    if (after.size !== opened.size || after.mtimeMs !== opened.mtimeMs || data.byteLength !== opened.size) {
-      failure("SOURCE_UNAVAILABLE");
-    }
+    data = await readStableDescriptor(handle, opened, {
+      maxBytes: MAX_ARCHIVE_BYTES,
+      tooLarge: { code: "SOURCE_UNAVAILABLE" },
+      changed: { code: "SOURCE_CHANGED" }
+    });
   } catch (error) {
     if (error instanceof ImportInspectionError) {
       throw error;

@@ -1,11 +1,15 @@
 import path from "node:path";
 
+import { strToU8, zipSync } from "fflate";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 const race = vi.hoisted(() => ({
-  target: "",
+  lstatTarget: "",
+  descriptorTarget: "",
   appendBytes: Buffer.alloc(0),
-  triggered: false
+  lstatTriggered: false,
+  descriptorTriggered: false,
+  readFileBytes: 0
 }));
 
 vi.mock("node:fs/promises", async (importOriginal) => {
@@ -14,16 +18,45 @@ vi.mock("node:fs/promises", async (importOriginal) => {
     ...actual,
     lstat: async (...args: Parameters<typeof actual.lstat>) => {
       const stats = await actual.lstat(...args);
-      if (!race.triggered && String(args[0]) === race.target) {
-        race.triggered = true;
-        await actual.appendFile(race.target, race.appendBytes);
+      if (!race.lstatTriggered && String(args[0]) === race.lstatTarget) {
+        race.lstatTriggered = true;
+        await actual.appendFile(race.lstatTarget, race.appendBytes);
       }
       return stats;
+    },
+    open: async (...args: Parameters<typeof actual.open>) => {
+      const handle = await actual.open(...args);
+      if (String(args[0]) !== race.descriptorTarget) {
+        return handle;
+      }
+      return new Proxy(handle, {
+        get(target, property, receiver) {
+          if (property === "stat") {
+            return async () => {
+              const stats = await target.stat();
+              if (!race.descriptorTriggered) {
+                race.descriptorTriggered = true;
+                await actual.appendFile(race.descriptorTarget, race.appendBytes);
+              }
+              return stats;
+            };
+          }
+          if (property === "readFile") {
+            return async () => {
+              const data = await target.readFile();
+              race.readFileBytes = data.byteLength;
+              return data;
+            };
+          }
+          const value = Reflect.get(target, property, receiver) as unknown;
+          return typeof value === "function" ? value.bind(target) : value;
+        }
+      });
     }
   };
 });
 
-import { chmod, mkdir, mkdtemp, readdir, realpath, rm, writeFile } from "node:fs/promises";
+import { chmod, mkdir, mkdtemp, readdir, realpath, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 
 import { importSkill } from "../../src/core/importer.js";
@@ -41,9 +74,12 @@ async function makeDirectoriesRemovable(directory: string): Promise<void> {
 }
 
 afterEach(async () => {
-  race.target = "";
+  race.lstatTarget = "";
+  race.descriptorTarget = "";
   race.appendBytes = Buffer.alloc(0);
-  race.triggered = false;
+  race.lstatTriggered = false;
+  race.descriptorTriggered = false;
+  race.readFileBytes = 0;
 });
 
 describe("stable bounded local file reads", () => {
@@ -59,12 +95,35 @@ describe("stable bounded local file reads", () => {
       const changing = path.join(source, "c.bin");
       await writeFile(changing, Buffer.alloc(MiB - Buffer.byteLength(skill) - 1));
 
-      race.target = changing;
+      race.lstatTarget = changing;
       race.appendBytes = Buffer.alloc(2);
 
       await expect(importSkill({ kind: "local", path: source }, path.join(root, "imports")))
         .rejects.toMatchObject({ code: "SOURCE_UNAVAILABLE", details: { path: "c.bin" } });
-      expect(race.triggered).toBe(true);
+      expect(race.lstatTriggered).toBe(true);
+    } finally {
+      await makeDirectoriesRemovable(root);
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+});
+
+describe("stable bounded ZIP source reads", () => {
+  it("rejects descriptor growth without reading beyond the initially opened size", async () => {
+    const root = await realpath(await mkdtemp(path.join(tmpdir(), "scta-zip-source-race-")));
+    try {
+      const archive = path.join(root, "skill.zip");
+      const initial = Buffer.from(zipSync({ "SKILL.md": strToU8("# Skill\n") }));
+      await writeFile(archive, initial);
+
+      race.descriptorTarget = archive;
+      race.appendBytes = Buffer.from("xyz");
+
+      await expect(importSkill({ kind: "zip", path: archive }, path.join(root, "imports")))
+        .rejects.toMatchObject({ code: "SOURCE_CHANGED" });
+      expect(race.descriptorTriggered).toBe(true);
+      expect((await stat(archive)).size).toBe(initial.byteLength + 3);
+      expect(race.readFileBytes).toBe(0);
     } finally {
       await makeDirectoriesRemovable(root);
       await rm(root, { recursive: true, force: true });

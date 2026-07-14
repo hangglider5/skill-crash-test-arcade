@@ -78,3 +78,21 @@ Portable Node does not expose `openat(2)` or a cross-platform directory `RENAME_
 - Final gate: `pnpm typecheck && pnpm test && git diff --check`.
 - The sample fixture is unchanged, so its prior successful validation remains applicable.
 - Residual assumption remains unchanged: same-user mutation after the final descriptor check is outside the captured snapshot contents.
+
+## Final ZIP descriptor-read fix (2026-07-14)
+
+### TDD evidence
+
+- RED: `pnpm exec vitest run test/core/importer-source-race.test.ts` failed 1/2 cases. A test-only descriptor wrapper appended three bytes immediately after the first descriptor stat; the ZIP import returned `SOURCE_UNAVAILABLE` after using `FileHandle.readFile()` instead of the required `SOURCE_CHANGED` bounded-read result.
+- GREEN: `pnpm typecheck && pnpm exec vitest run test/core/importer-source-race.test.ts test/core/importer.test.ts` passed typecheck and all 38 focused cases.
+- The regression uses a tiny valid ZIP and a narrow partial `node:fs/promises.open` wrapper. It records any unbounded `readFile()` bytes and requires zero, with no production test seam.
+
+### Fix
+
+- The existing fixed-size descriptor algorithm is now one shared helper: it enforces a caller-selected byte cap before exact allocation, performs bounded positional reads, probes one byte at exact EOF, and compares final descriptor identity, ownership, mode, link count, size, mtime, and ctime.
+- Local/Git collection retains its existing per-file and aggregate error mappings. ZIP input now uses the same helper with the 16 MiB cap, preserves `SOURCE_UNAVAILABLE` for over-limit input, and reports descriptor instability as `SOURCE_CHANGED`.
+- ZIP parsing remains a pure `Buffer` operation and the sample fixture remains unchanged.
+
+### Validation
+
+- Final gate: `pnpm typecheck && pnpm test && git diff --check`.
