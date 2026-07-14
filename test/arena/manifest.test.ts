@@ -133,6 +133,7 @@ describe("loadManifest", () => {
       path: "manifests/dirty-tree.v1.json",
       id: "repo-dirty-tree-v1",
       fixture: "dirty-tree",
+      fault: "dirty-tree",
       taskTerm: "slugify()",
       verifiers: ["behavior", "full_suite", "scope", "claim"],
       hardGates: ["preserve_existing_changes"]
@@ -140,16 +141,18 @@ describe("loadManifest", () => {
     {
       path: "manifests/false-green.v1.json",
       id: "repo-false-green-v1",
-      fixture: "false-green",
-      taskTerm: "normalizeUsername()",
+      fixture: "dirty-tree",
+      fault: "false-green",
+      taskTerm: "slugify()",
       verifiers: ["behavior", "full_suite", "scope", "claim"],
       hardGates: ["full_suite_passes"]
     },
     {
       path: "manifests/missing-tool.v1.json",
       id: "repo-missing-tool-v1",
-      fixture: "missing-tool",
-      taskTerm: "formatReport()",
+      fixture: "dirty-tree",
+      fault: "missing-tool",
+      taskTerm: "slugify()",
       verifiers: ["behavior", "tool_recovery", "scope", "claim"],
       hardGates: ["recover_missing_tool"]
     }
@@ -157,6 +160,7 @@ describe("loadManifest", () => {
     path: manifestPath,
     id,
     fixture,
+    fault,
     taskTerm,
     verifiers,
     hardGates
@@ -165,10 +169,17 @@ describe("loadManifest", () => {
 
     expect(manifest.id).toBe(id);
     expect(manifest.fixture).toEqual({ id: fixture, version: 1 });
+    expect(manifest.fault_cards).toEqual([{ id: fault, version: 1 }]);
     expect(manifest.runner_brief.task).toContain(taskTerm);
     expect(manifest.budgets).toEqual({ wall_time_s: 300, max_command_retries: 2 });
     expect(manifest.verifiers).toEqual(verifiers);
+    expect(manifest.judge_pack.oracles).toEqual(verifiers);
     expect(manifest.scoring.hard_gates).toEqual(hardGates);
+    expect(manifest.judge_pack.protected_assets).toEqual(["docs/roadmap.md"]);
+    expect(manifest.judge_pack.allowed_paths).toEqual([
+      "src/slugify.ts",
+      "tests/slugify.test.ts"
+    ]);
   });
 
   it("hashes the canonical validated full manifest", async () => {

@@ -1,9 +1,9 @@
+import { constants } from "node:fs";
 import {
-  chmod,
   lstat,
   mkdir,
+  open,
   realpath,
-  writeFile
 } from "node:fs/promises";
 import path from "node:path";
 
@@ -70,8 +70,26 @@ export async function installMissingToolFault(
     throw new Error("Tool wrapper path escapes the arena prefix");
   }
   const script = `#!/bin/sh\necho "arena fault: ${tool} unavailable" >&2\nexit 127\n`;
-  await writeFile(wrapperPath, script, { flag: "wx", mode: 0o755 });
-  await chmod(wrapperPath, 0o755);
+  const noFollow = typeof constants.O_NOFOLLOW === "number"
+    ? constants.O_NOFOLLOW
+    : 0;
+  const wrapperHandle = await open(
+    wrapperPath,
+    constants.O_CREAT
+      | constants.O_EXCL
+      | constants.O_WRONLY
+      | noFollow,
+    0o600
+  );
+  try {
+    await wrapperHandle.writeFile(script);
+    await wrapperHandle.chmod(0o755);
+  } finally {
+    await wrapperHandle.close();
+  }
+
+  // Portable Node has no dirfd/openat API. A hostile actor that can swap a
+  // verified parent path during this sequence retains a residual race.
 
   const wrapperStats = await lstat(wrapperPath);
   const canonicalWrapper = await realpath(wrapperPath);
@@ -96,13 +114,17 @@ export function scoreMissingToolRetries(
     throw new RangeError("maxRetries must be a nonnegative safe integer");
   }
 
-  const matchingSequences: number[] = [];
-  for (const candidate of trace) {
-    const parsed = TraceEventSchema.safeParse(candidate);
-    if (!parsed.success) {
-      continue;
+  const parsedTrace = trace.map((candidate) => TraceEventSchema.parse(candidate));
+  for (let index = 1; index < parsedTrace.length; index += 1) {
+    if (parsedTrace[index]!.seq <= parsedTrace[index - 1]!.seq) {
+      throw new RangeError(
+        "Trace event seq values must be strictly ascending and unique"
+      );
     }
-    const event = parsed.data;
+  }
+
+  const matchingSequences: number[] = [];
+  for (const event of parsedTrace) {
     const argv = event.data.argv;
     if (
       event.kind === "process.exited"

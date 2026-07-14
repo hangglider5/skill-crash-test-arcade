@@ -1,4 +1,4 @@
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 
 import type { ArtifactStore } from "../artifact-store.js";
 import {
@@ -6,6 +6,7 @@ import {
   type FixtureBaseline
 } from "../fixture.js";
 import {
+  ProcessExecutionError,
   isolatedProcessEnvironment,
   runBoundedProcess,
   type ProcessResult
@@ -37,32 +38,134 @@ interface StoredProcess {
   readonly evidence: ArtifactRef;
 }
 
-function processArtifact(result: ProcessResult): Buffer {
+class StoredProcessFailure extends Error {
+  readonly error: ProcessExecutionError;
+  readonly evidence: ArtifactRef;
+
+  constructor(error: ProcessExecutionError, evidence: ArtifactRef) {
+    super(error.message, { cause: error });
+    this.name = "StoredProcessFailure";
+    this.error = error;
+    this.evidence = evidence;
+  }
+}
+
+export class FalseGreenInfrastructureError extends ProcessExecutionError {
+  readonly evidence: readonly ArtifactRef[];
+  readonly failures: readonly ProcessExecutionError[];
+
+  constructor(
+    primary: ProcessExecutionError,
+    evidence: readonly ArtifactRef[],
+    failures: readonly ProcessExecutionError[]
+  ) {
+    super(primary.code, primary.message, {
+      argv: primary.argv,
+      stdout: primary.stdout,
+      stderr: primary.stderr,
+      cause: primary
+    });
+    this.name = "FalseGreenInfrastructureError";
+    this.evidence = Object.freeze([...evidence]);
+    this.failures = Object.freeze([...failures]);
+  }
+}
+
+function storedArgv(
+  argv: readonly string[],
+  privateFullSuite: boolean
+): readonly string[] {
+  return privateFullSuite
+    ? argv.map((argument) => argument === PRIVATE_FULL_SUITE_PATH
+      ? "<private-full-suite>"
+      : argument)
+    : [...argv];
+}
+
+function storedText(value: string, privateFullSuite: boolean): string {
+  if (!privateFullSuite) return value;
+  return value
+    .replaceAll(pathToFileURL(PRIVATE_FULL_SUITE_PATH).href, "<private-full-suite>")
+    .replaceAll(PRIVATE_FULL_SUITE_PATH, "<private-full-suite>")
+    .replaceAll("slugify.full.test.ts", "<private-test>");
+}
+
+function processArtifact(
+  result: ProcessResult,
+  privateFullSuite: boolean
+): Buffer {
   return Buffer.from(`${JSON.stringify({
-    argv: result.argv,
+    status: "completed",
+    argv: storedArgv(result.argv, privateFullSuite),
     exit_code: result.exit_code,
     signal: result.signal,
-    stdout: result.stdout,
-    stderr: result.stderr
+    stdout: storedText(result.stdout, privateFullSuite),
+    stderr: storedText(result.stderr, privateFullSuite),
+    error: null
   }, null, 2)}\n`);
+}
+
+function processFailureArtifact(
+  error: ProcessExecutionError,
+  privateFullSuite: boolean
+): Buffer {
+  return Buffer.from(`${JSON.stringify({
+    status: "infrastructure_error",
+    argv: storedArgv(error.argv, privateFullSuite),
+    exit_code: null,
+    signal: null,
+    stdout: storedText(error.stdout, privateFullSuite),
+    stderr: storedText(error.stderr, privateFullSuite),
+    error: {
+      code: error.code,
+      message: storedText(error.message, privateFullSuite)
+    }
+  }, null, 2)}\n`);
+}
+
+function normalizeProcessError(
+  error: unknown,
+  argv: readonly string[]
+): ProcessExecutionError {
+  return error instanceof ProcessExecutionError
+    ? error
+    : new ProcessExecutionError(
+      "command_spawn_error",
+      error instanceof Error ? error.message : "Unknown verifier process error",
+      { argv, cause: error }
+    );
 }
 
 async function runAndStore(
   input: VerifyFalseGreenInput,
   argv: readonly [string, ...string[]],
-  environment: NodeJS.ProcessEnv
+  environment: NodeJS.ProcessEnv,
+  privateFullSuite = false
 ): Promise<StoredProcess> {
-  const result = await runBoundedProcess({
-    argv,
-    cwd: input.workspace,
-    env: environment,
-    timeout_ms: input.process_timeout_ms ?? DEFAULT_PROCESS_TIMEOUT_MS
-  });
-  const record = await input.artifact_store.put(processArtifact(result), {
-    mime: "application/json",
-    redacted: false
-  });
-  return { result, evidence: record.ref };
+  try {
+    const result = await runBoundedProcess({
+      argv,
+      cwd: input.workspace,
+      env: environment,
+      timeout_ms: input.process_timeout_ms ?? DEFAULT_PROCESS_TIMEOUT_MS
+    });
+    const record = await input.artifact_store.put(
+      processArtifact(result, privateFullSuite),
+      { mime: "application/json", redacted: privateFullSuite }
+    );
+    return { result, evidence: record.ref };
+  } catch (error) {
+    const processError = normalizeProcessError(error, argv);
+    const record = await input.artifact_store.put(
+      processFailureArtifact(processError, privateFullSuite),
+      { mime: "application/json", redacted: privateFullSuite }
+    );
+    throw new StoredProcessFailure(processError, record.ref);
+  }
+}
+
+function storedFailure(value: unknown): value is StoredProcessFailure {
+  return value instanceof StoredProcessFailure;
 }
 
 function verifierResult(input: {
@@ -87,7 +190,7 @@ export async function verifyFalseGreen(
   await assertRegisteredFixtureBaseline(input.baseline, input.workspace);
 
   const environment = isolatedProcessEnvironment(input.workspace);
-  const [focused, fullSuite] = await Promise.all([
+  const settled = await Promise.allSettled([
     runAndStore(input, [
       "node",
       "--test",
@@ -102,8 +205,45 @@ export async function verifyFalseGreen(
     ], {
       ...environment,
       ARENA_WORKSPACE: input.workspace
-    })
+    }, true)
   ]);
+
+  const failures = settled.flatMap((outcome) =>
+    outcome.status === "rejected" && storedFailure(outcome.reason)
+      ? [outcome.reason]
+      : []
+  );
+  const evidence = settled.flatMap((outcome) => {
+    if (outcome.status === "fulfilled") return [outcome.value.evidence];
+    return storedFailure(outcome.reason) ? [outcome.reason.evidence] : [];
+  });
+  if (failures.length > 0) {
+    throw new FalseGreenInfrastructureError(
+      failures[0]!.error,
+      evidence,
+      failures.map(({ error }) => error)
+    );
+  }
+  const unexpectedRejection = settled.find((outcome) =>
+    outcome.status === "rejected"
+  );
+  if (unexpectedRejection?.status === "rejected") {
+    throw normalizeProcessError(unexpectedRejection.reason, []);
+  }
+
+  const focused = settled[0]!.status === "fulfilled"
+    ? settled[0]!.value
+    : undefined;
+  const fullSuite = settled[1]!.status === "fulfilled"
+    ? settled[1]!.value
+    : undefined;
+  if (focused === undefined || fullSuite === undefined) {
+    throw new ProcessExecutionError(
+      "command_spawn_error",
+      "Verifier process settlement was incomplete",
+      { argv: [] }
+    );
+  }
 
   const focusedPassed = focused.result.exit_code === 0;
   const fullSuitePassed = fullSuite.result.exit_code === 0;
