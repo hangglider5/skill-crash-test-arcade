@@ -7,9 +7,11 @@ const MAX_PROCESS_OUTPUT_BYTES = 1024 * 1024;
 export type ProcessErrorCode =
   | "command_not_found"
   | "command_spawn_error"
+  | "command_failed"
   | "command_timeout"
   | "command_output_limit"
-  | "invalid_fixture_baseline";
+  | "invalid_fixture_baseline"
+  | "unsupported_platform";
 
 export interface ProcessResult {
   argv: readonly string[];
@@ -51,6 +53,18 @@ export class ProcessExecutionError extends Error {
   }
 }
 
+export function assertSupportedProcessPlatform(
+  platform: NodeJS.Platform = process.platform
+): void {
+  if (platform === "win32") {
+    throw new ProcessExecutionError(
+      "unsupported_platform",
+      "Task 4 process execution supports POSIX hosts only (macOS and Linux)",
+      { argv: [] }
+    );
+  }
+}
+
 export function isolatedProcessEnvironment(workspace: string): NodeJS.ProcessEnv {
   const executablePath = process.env.PATH;
   if (executablePath === undefined || executablePath.length === 0) {
@@ -60,6 +74,8 @@ export function isolatedProcessEnvironment(workspace: string): NodeJS.ProcessEnv
   return {
     PATH: executablePath,
     HOME: workspace,
+    TMPDIR: `${workspace}/.git/arena-tmp`,
+    NODE_COMPILE_CACHE: `${workspace}/.git/arena-node-cache`,
     LANG: "C",
     LC_ALL: "C",
     CI: "1",
@@ -75,6 +91,7 @@ export function isolatedProcessEnvironment(workspace: string): NodeJS.ProcessEnv
 }
 
 export function runBoundedProcess(input: BoundedProcessInput): Promise<ProcessResult> {
+  assertSupportedProcessPlatform();
   if (!Number.isSafeInteger(input.timeout_ms) || input.timeout_ms <= 0) {
     throw new RangeError("timeout_ms must be a positive safe integer");
   }

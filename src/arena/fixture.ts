@@ -1,10 +1,20 @@
-import { appendFile, cp, readdir, readFile } from "node:fs/promises";
+import {
+  appendFile,
+  cp,
+  lstat,
+  readdir,
+  readFile,
+  readlink,
+  realpath
+} from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
 import { canonicalJson, sha256, type Hash } from "../protocol/index.js";
 import { loadManifest } from "./manifest.js";
+import { parsePorcelainV1Z } from "./git-z.js";
 import {
+  ProcessExecutionError,
   isolatedProcessEnvironment,
   runBoundedProcess,
   type ProcessResult
@@ -20,6 +30,213 @@ export interface FixtureBaseline {
   readonly protected_hashes: Readonly<Record<string, Hash>>;
   readonly initial_status: string;
   readonly allowed_paths: readonly string[];
+}
+
+interface InventoryEntry {
+  readonly type: "directory" | "file" | "symlink" | "other";
+  readonly mode: number;
+  readonly hash: Hash | null;
+  readonly link_target: string | null;
+}
+
+interface BaselineAuthority {
+  readonly workspace: string;
+  readonly public_fingerprint: Hash;
+  readonly inventory_fingerprint: Hash;
+  readonly inventory: Readonly<Record<string, InventoryEntry>>;
+  readonly preexisting_protected_paths: ReadonlySet<string>;
+}
+
+export interface ProtectedPathComparison {
+  readonly path: string;
+  readonly baseline: {
+    readonly type: string;
+    readonly mode: number | null;
+    readonly hash: Hash | null;
+    readonly realpath: string | null;
+  };
+  readonly actual: {
+    readonly type: string;
+    readonly mode: number | null;
+    readonly hash: Hash | null;
+    readonly realpath: string | null;
+    readonly escapes_workspace: boolean;
+  };
+  readonly preserved: boolean;
+  readonly reasons: readonly string[];
+}
+
+export interface FixtureFilesystemAudit {
+  readonly out_of_scope_paths: readonly string[];
+  readonly protected: readonly ProtectedPathComparison[];
+}
+
+const baselineAuthorities = new WeakMap<FixtureBaseline, BaselineAuthority>();
+
+function entryType(stats: Awaited<ReturnType<typeof lstat>>): InventoryEntry["type"] {
+  if (stats.isFile()) return "file";
+  if (stats.isDirectory()) return "directory";
+  if (stats.isSymbolicLink()) return "symlink";
+  return "other";
+}
+
+async function captureInventory(root: string): Promise<Record<string, InventoryEntry>> {
+  const inventory: Record<string, InventoryEntry> = {};
+
+  const visit = async (relativeDirectory: string): Promise<void> => {
+    const directory = path.join(root, relativeDirectory);
+    const names = (await readdir(directory)).sort();
+    for (const name of names) {
+      const relativePath = relativeDirectory.length === 0
+        ? name
+        : path.posix.join(relativeDirectory, name);
+      if (relativePath === ".git") {
+        continue;
+      }
+      const absolutePath = path.join(root, ...relativePath.split("/"));
+      const stats = await lstat(absolutePath);
+      const type = entryType(stats);
+      inventory[relativePath] = Object.freeze({
+        type,
+        mode: stats.mode & 0o7777,
+        hash: type === "file" ? sha256(await readFile(absolutePath)) : null,
+        link_target: type === "symlink" ? await readlink(absolutePath) : null
+      });
+      if (type === "directory") {
+        await visit(relativePath);
+      }
+    }
+  };
+
+  await visit("");
+  return inventory;
+}
+
+function isWithin(root: string, candidate: string): boolean {
+  const relative = path.relative(root, candidate);
+  return relative === "" || (!relative.startsWith(`..${path.sep}`) && relative !== "..");
+}
+
+function invalidBaseline(message: string): ProcessExecutionError {
+  return new ProcessExecutionError(
+    "invalid_fixture_baseline",
+    message,
+    { argv: ["fixture-baseline"] }
+  );
+}
+
+function publicBaselineFingerprint(baseline: FixtureBaseline): Hash {
+  return sha256(canonicalJson({
+    base_commit: baseline.base_commit,
+    protected_hashes: baseline.protected_hashes,
+    initial_status: baseline.initial_status,
+    allowed_paths: baseline.allowed_paths
+  }));
+}
+
+async function registeredAuthority(
+  baseline: FixtureBaseline,
+  workspace: string
+): Promise<BaselineAuthority> {
+  const authority = baselineAuthorities.get(baseline);
+  if (authority === undefined) {
+    throw invalidBaseline("Fixture baseline is not registered by materializeFixture");
+  }
+  if (
+    !Object.isFrozen(baseline)
+    || !Object.isFrozen(baseline.allowed_paths)
+    || !Object.isFrozen(baseline.protected_hashes)
+    || publicBaselineFingerprint(baseline) !== authority.public_fingerprint
+    || baseline.fixture_hash !== authority.public_fingerprint
+    || sha256(canonicalJson(authority.inventory)) !== authority.inventory_fingerprint
+  ) {
+    throw invalidBaseline("Registered fixture baseline identity is invalid");
+  }
+
+  const canonicalWorkspace = await realpath(workspace);
+  if (canonicalWorkspace !== authority.workspace) {
+    throw invalidBaseline("Fixture baseline does not belong to this workspace");
+  }
+  return authority;
+}
+
+export async function assertRegisteredFixtureBaseline(
+  baseline: FixtureBaseline,
+  workspace: string
+): Promise<void> {
+  await registeredAuthority(baseline, workspace);
+}
+
+export async function auditFixtureFilesystem(
+  baseline: FixtureBaseline,
+  workspace: string
+): Promise<FixtureFilesystemAudit> {
+  const authority = await registeredAuthority(baseline, workspace);
+  const canonicalWorkspace = authority.workspace;
+
+  const actualInventory = await captureInventory(canonicalWorkspace);
+  const allowedPaths = new Set(baseline.allowed_paths);
+  const allPaths = new Set([
+    ...Object.keys(authority.inventory),
+    ...Object.keys(actualInventory)
+  ]);
+  const outOfScopePaths = [...allPaths].filter((relativePath) => {
+    if (allowedPaths.has(relativePath)) {
+      return false;
+    }
+    return canonicalJson(authority.inventory[relativePath] ?? null)
+      !== canonicalJson(actualInventory[relativePath] ?? null);
+  }).sort();
+
+  const protectedComparisons = await Promise.all(
+    [...authority.preexisting_protected_paths].sort().map(async (protectedPath) => {
+      const expected = authority.inventory[protectedPath];
+      if (expected?.type !== "file") {
+        throw invalidBaseline(`Protected baseline path is not a regular file: ${protectedPath}`);
+      }
+      const absolutePath = path.join(canonicalWorkspace, ...protectedPath.split("/"));
+      const actual = actualInventory[protectedPath];
+      let actualRealpath: string | null = null;
+      try {
+        actualRealpath = await realpath(absolutePath);
+      } catch {
+        // Missing or dangling paths are reported by the comparison below.
+      }
+      const reasons: string[] = [];
+      if (actual === undefined) reasons.push("missing");
+      if (actual !== undefined && actual.type !== "file") reasons.push("type_changed");
+      if (actual?.type === "symlink") reasons.push("symlink_substitution");
+      if (actual !== undefined && actual.mode !== expected.mode) reasons.push("mode_changed");
+      if (actual !== undefined && actual.hash !== expected.hash) reasons.push("hash_changed");
+      const escapesWorkspace = actualRealpath !== null
+        && !isWithin(canonicalWorkspace, actualRealpath);
+      if (escapesWorkspace) reasons.push("realpath_escape");
+
+      return {
+        path: protectedPath,
+        baseline: {
+          type: expected.type,
+          mode: expected.mode,
+          hash: expected.hash,
+          realpath: path.join(canonicalWorkspace, ...protectedPath.split("/"))
+        },
+        actual: {
+          type: actual?.type ?? "missing",
+          mode: actual?.mode ?? null,
+          hash: actual?.hash ?? null,
+          realpath: actualRealpath,
+          escapes_workspace: escapesWorkspace
+        },
+        preserved: reasons.length === 0,
+        reasons
+      } satisfies ProtectedPathComparison;
+    })
+  );
+
+  return {
+    out_of_scope_paths: outOfScopePaths,
+    protected: protectedComparisons
+  };
 }
 
 function fixtureTemplatePath(fixtureId: string): string {
@@ -110,9 +327,22 @@ export async function materializeFixture(
   ));
   const initialStatus = (await runGit(destination, [
     "status",
-    "--short",
+    "--porcelain=v1",
+    "-z",
     "--untracked-files=all"
   ])).stdout;
+
+  const initialRecords = parsePorcelainV1Z(initialStatus);
+  const protectedPathSet = new Set(loaded.manifest.judge_pack.protected_assets);
+  const initialPaths = initialRecords.flatMap(({ paths }) => paths);
+  if (
+    initialRecords.some(({ code }) => code !== " M")
+    || initialPaths.length !== protectedPathSet.size
+    || initialPaths.some((changedPath) => !protectedPathSet.has(changedPath))
+    || [...protectedPathSet].some((protectedPath) => !initialPaths.includes(protectedPath))
+  ) {
+    throw new Error("Initial Git status does not bind every protected change exactly once");
+  }
 
   const baselineFields = {
     base_commit: baseCommit,
@@ -121,8 +351,28 @@ export async function materializeFixture(
     allowed_paths: Object.freeze([...loaded.manifest.judge_pack.allowed_paths])
   };
 
-  return Object.freeze({
+  const baseline = Object.freeze({
     ...baselineFields,
     fixture_hash: sha256(canonicalJson(baselineFields))
   });
+  const canonicalWorkspace = await realpath(destination);
+  const inventory = Object.freeze(await captureInventory(canonicalWorkspace));
+  for (const protectedPath of protectedPathSet) {
+    const protectedEntry = inventory[protectedPath];
+    if (protectedEntry?.type !== "file") {
+      throw new Error(`Protected fixture path must be a regular file: ${protectedPath}`);
+    }
+    const canonicalProtectedPath = await realpath(path.join(destination, protectedPath));
+    if (!isWithin(canonicalWorkspace, canonicalProtectedPath)) {
+      throw new Error(`Protected fixture path escapes workspace: ${protectedPath}`);
+    }
+  }
+  baselineAuthorities.set(baseline, Object.freeze({
+    workspace: canonicalWorkspace,
+    public_fingerprint: baseline.fixture_hash,
+    inventory_fingerprint: sha256(canonicalJson(inventory)),
+    inventory,
+    preexisting_protected_paths: new Set(initialPaths)
+  }));
+  return baseline;
 }
