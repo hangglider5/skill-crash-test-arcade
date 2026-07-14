@@ -118,6 +118,17 @@ function snapshot(importedPath: string): SkillSnapshot {
   return { ...candidate, source_hash: computeSnapshotSourceHash(candidate) };
 }
 
+function stableRepairedSnapshot(original: SkillSnapshot): SkillSnapshot {
+  const candidate = {
+    ...original,
+    source: { kind: "local" as const, uri: "repair:stable" }
+  };
+  return {
+    ...candidate,
+    source_hash: computeSnapshotSourceHash(candidate)
+  };
+}
+
 afterEach(async () => {
   await Promise.all(roots.splice(0).map(async (root) => {
     for (const snapshotName of await readdir(path.join(root, "imports")).catch(() => [])) {
@@ -294,6 +305,9 @@ async function repairFixture(
   options: {
     readonly fixedRepairedSnapshot?: boolean;
     readonly loadSnapshotTransform?: (snapshot: SkillSnapshot) => SkillSnapshot;
+    readonly coordinatorCount?: number;
+    readonly synchronizeRepairedImports?: boolean;
+    readonly delayTrialReads?: boolean;
   } = {}
 ) {
   const root = await temporaryRoot();
@@ -341,17 +355,24 @@ async function repairFixture(
       manifest_hash: string;
       fixture_hash: string;
       runner: RunEnvelope["runner"];
+      snapshot_execution_fingerprint: string;
     };
   }> = [];
   const createdChildren: RunEnvelope[] = [];
   const executed: string[] = [];
-  const coordinator = new RepairCoordinator({
+  let synchronizedRepairedImports = 0;
+  let releaseRepairedImports!: () => void;
+  const repairedImportsReady = new Promise<void>((resolve) => {
+    releaseRepairedImports = resolve;
+  });
+  const createCoordinator = () => new RepairCoordinator({
     runStore,
     artifactStore,
     runner,
     repairsRoot: path.join(root, "repairs"),
     importsRoot,
     runnerOutputRoot,
+    trialCoordinationDomain: path.join(root, "runs"),
     toolPath: [path.dirname(process.execPath), "/usr/bin", "/bin"].join(path.delimiter),
     timeoutMs: 5_000,
     idFactory: () => repairIds.shift()!,
@@ -383,24 +404,35 @@ async function repairFixture(
       return child;
     },
     async executeChildRun(runId) { executed.push(runId); },
-    async listRunsForGroup() { return [baseline, ...createdChildren]; },
+    async listRunsForGroup() {
+      const observed = [baseline, ...createdChildren];
+      if (options.delayTrialReads) {
+        await new Promise<void>((resolve) => setTimeout(resolve, 0));
+      }
+      return observed;
+    },
     ...(options.fixedRepairedSnapshot
       ? {
           async importRepairedSnapshot() {
-            const candidate = {
-              ...original,
-              source: { kind: "local" as const, uri: "repair:stable" }
-            };
-            return {
-              ...candidate,
-              source_hash: computeSnapshotSourceHash(candidate)
-            };
+            if (options.synchronizeRepairedImports) {
+              synchronizedRepairedImports += 1;
+              if (synchronizedRepairedImports === (options.coordinatorCount ?? 1)) {
+                releaseRepairedImports();
+              }
+              await repairedImportsReady;
+            }
+            return stableRepairedSnapshot(original);
           }
         }
       : {})
   });
+  const coordinators = Array.from(
+    { length: options.coordinatorCount ?? 1 },
+    createCoordinator
+  );
+  const coordinator = coordinators[0]!;
   return {
-    root, original, baseline, coordinator, runner, artifactStore,
+    root, original, baseline, coordinator, coordinators, runner, artifactStore,
     childRequests, executed, collisionSentinel
   };
 }
@@ -469,12 +501,46 @@ describe("RepairCoordinator", () => {
     await writeFile(path.join(fixture.runner.input!.cwd, "SKILL.md"), "# Tampered after review\n");
 
     await expect(fixture.coordinator.approveAndRerun(proposal.repair_id))
-      .rejects.toThrow(/changed after review|reviewed repair/u);
+      .rejects.toMatchObject({
+        code: "REPAIR_APPROVAL_FAILED",
+        message: "Repair approval failed"
+      });
     const record = JSON.parse(await readFile(
       path.join(fixture.root, "runs", "run_baseline", "repair.json"), "utf8"
     ));
     expect(record).toMatchObject({ status: "failed", error: { code: "REPAIR_APPROVAL_FAILED" } });
     expect(JSON.stringify(record)).not.toContain(fixture.root);
+  });
+
+  it("returns a stable domain error when the repair directory disappears", async () => {
+    const fixture = await repairFixture(async (cwd) => {
+      await writeFile(path.join(cwd, "SKILL.md"), "# Reviewed repair\n");
+    });
+    const proposal = await fixture.coordinator.createRepairFork("run_baseline");
+    const repairsRoot = path.join(fixture.root, "repairs");
+    await rm(repairsRoot, { recursive: true });
+
+    let failure: unknown;
+    try {
+      await fixture.coordinator.approveAndRerun(proposal.repair_id);
+    } catch (error) {
+      failure = error;
+    }
+
+    expect(failure).toBeInstanceOf(Error);
+    expect(failure).toMatchObject({
+      code: "REPAIR_APPROVAL_FAILED",
+      message: "Repair approval failed"
+    });
+    expect(failure).not.toHaveProperty("cause");
+    expect((failure as Error).message).not.toContain(fixture.root);
+    expect((failure as Error).message).not.toContain(repairsRoot);
+    expect(JSON.parse(await readFile(
+      path.join(fixture.root, "runs", "run_baseline", "repair.json"), "utf8"
+    ))).toMatchObject({
+      status: "failed",
+      error: { code: "REPAIR_APPROVAL_FAILED" }
+    });
   });
 
   it("allocates distinct trials for concurrent approvals of the same repaired snapshot", async () => {
@@ -493,6 +559,33 @@ describe("RepairCoordinator", () => {
       .toEqual([0, 1]);
     expect(new Set(fixture.childRequests.map(({ snapshot_hash }) => snapshot_hash)).size)
       .toBe(1);
+    const expectedFingerprint = computeSnapshotExecutionFingerprint(
+      stableRepairedSnapshot(fixture.original)
+    );
+    expect(new Set(fixture.childRequests.map(
+      ({ expected_lineage }) => expected_lineage.snapshot_execution_fingerprint
+    ))).toEqual(new Set([expectedFingerprint]));
+  });
+
+  it("allocates distinct trials across coordinators sharing one authority", async () => {
+    const fixture = await repairFixture(async (cwd) => {
+      await writeFile(path.join(cwd, "SKILL.md"), "# Stable repaired Skill\n");
+    }, {
+      fixedRepairedSnapshot: true,
+      coordinatorCount: 2,
+      synchronizeRepairedImports: true,
+      delayTrialReads: true
+    });
+    const first = await fixture.coordinators[0]!.createRepairFork("run_baseline");
+    const second = await fixture.coordinators[1]!.createRepairFork("run_baseline");
+
+    await Promise.all([
+      fixture.coordinators[0]!.approveAndRerun(first.repair_id),
+      fixture.coordinators[1]!.approveAndRerun(second.repair_id)
+    ]);
+
+    expect(fixture.childRequests.map(({ trial_index }) => trial_index).sort())
+      .toEqual([0, 1]);
   });
 
   it("allows an existing Markdown file explicitly linked by the entrypoint", async () => {

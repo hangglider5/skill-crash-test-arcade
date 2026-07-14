@@ -51,6 +51,7 @@ export interface ExpectedRunLineage {
   readonly manifest_hash: RunEnvelope["manifest_hash"];
   readonly fixture_hash: RunEnvelope["fixture_hash"];
   readonly runner: RunEnvelope["runner"];
+  readonly snapshot_execution_fingerprint: string;
 }
 
 export interface CreateRunRequest {
@@ -428,6 +429,8 @@ export class RunOrchestrator {
     const runner = { adapter: "codex-cli" as const, model: "gpt-5.6" as const };
     if (request.expected_lineage.manifest_hash !== loaded.hash
       || request.expected_lineage.fixture_hash !== fixtureHash
+      || request.expected_lineage.snapshot_execution_fingerprint
+        !== validatedSnapshot.execution_fingerprint
       || canonicalJson(request.expected_lineage.runner) !== canonicalJson(runner)) {
       throw new Error("Run expected lineage does not match loaded immutable inputs");
     }
@@ -453,7 +456,8 @@ export class RunOrchestrator {
         this.#runs.set(runId, {
           envelope,
           manifestId: manifest.id,
-          snapshotExecutionFingerprint: validatedSnapshot.execution_fingerprint
+          snapshotExecutionFingerprint:
+            request.expected_lineage.snapshot_execution_fingerprint
         });
         return envelope;
       } catch (error) {

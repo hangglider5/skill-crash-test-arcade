@@ -43,6 +43,10 @@ const RepairOutputJsonSchema = z.toJSONSchema(RepairOutputSchema, { target: "dra
 const MAX_REPAIR_FILE_BYTES = 2 * 1024 * 1024;
 const MAX_REPAIR_TOTAL_BYTES = 5 * 1024 * 1024;
 
+// MVP boundary: this serializes coordinators in one JavaScript process only.
+// A multi-process deployment must move list+create behind one durable provider API.
+const PROCESS_TRIAL_ALLOCATION_LOCKS = new Map<string, Promise<void>>();
+
 interface Identity { readonly path: string; readonly dev: number; readonly ino: number }
 interface InventoryEntry { readonly type: "file" | "directory" | "other"; readonly mode: number; readonly hash?: string }
 
@@ -54,6 +58,15 @@ export interface RepairProposal {
   readonly created_at: string;
   readonly changed_paths: readonly string[];
   readonly patch_ref: ArtifactRef;
+}
+
+export class RepairApprovalError extends Error {
+  readonly code = "REPAIR_APPROVAL_FAILED" as const;
+
+  constructor() {
+    super("Repair approval failed");
+    this.name = "RepairApprovalError";
+  }
 }
 
 interface RepairRunContext {
@@ -69,6 +82,7 @@ export interface RepairCoordinatorOptions {
   readonly repairsRoot: string;
   readonly importsRoot: string;
   readonly runnerOutputRoot: string;
+  readonly trialCoordinationDomain: string;
   readonly toolPath: string;
   readonly timeoutMs: number;
   readonly idFactory?: () => string;
@@ -338,9 +352,12 @@ async function allocateRunnerOutput(
 export class RepairCoordinator {
   readonly #options: RepairCoordinatorOptions;
   readonly #repairs = new Map<string, PendingRepair>();
-  readonly #trialLocks = new Map<string, Promise<void>>();
   constructor(options: RepairCoordinatorOptions) {
     validateToolPath(options.toolPath);
+    if (options.trialCoordinationDomain.length === 0
+      || options.trialCoordinationDomain.includes("\0")) {
+      throw new Error("Trial coordination domain must be non-empty and contain no NUL");
+    }
     this.#options = options;
   }
 
@@ -526,10 +543,15 @@ export class RepairCoordinator {
             entrypoint: original.entrypoint
           }, this.#options.importsRoot)
         : await this.#options.importRepairedSnapshot(repair.sourcePath, original);
-      const repaired = validateSnapshotIdentity(repairedValue).snapshot;
+      const validatedRepaired = validateSnapshotIdentity(repairedValue);
+      const repaired = validatedRepaired.snapshot;
       await verifySnapshot(original, repair.originalModes);
       if (repaired.source_hash === repair.baseline.snapshot_hash) throw new Error("Approved repair did not create a new snapshot");
-      const allocationKey = `${repair.baseline.run_group_id}\0${repaired.source_hash}`;
+      const allocationKey = canonicalJson([
+        this.#options.trialCoordinationDomain,
+        repair.baseline.run_group_id,
+        repaired.source_hash
+      ]);
       const child = await this.#withTrialLock(allocationKey, async () => {
         const existing = (await this.#options.listRunsForGroup(repair.baseline.run_group_id))
           .map((run) => RunEnvelopeSchema.parse(run));
@@ -546,7 +568,9 @@ export class RepairCoordinator {
           expected_lineage: {
             manifest_hash: repair.baseline.manifest_hash,
             fixture_hash: repair.baseline.fixture_hash,
-            runner: repair.baseline.runner
+            runner: repair.baseline.runner,
+            snapshot_execution_fingerprint:
+              validatedRepaired.execution_fingerprint
           }
         }));
         if (created.parent_run_id !== repair.baseline.run_id
@@ -571,7 +595,7 @@ export class RepairCoordinator {
       });
       repair.state = "approved";
       return child;
-    } catch (error) {
+    } catch {
       repair.state = "failed";
       await this.#options.runStore.writeRecord(repair.baseline.run_id, "repair.json", {
         schema: "arena.repair/v1", repair_id: repair.proposal.repair_id,
@@ -579,20 +603,22 @@ export class RepairCoordinator {
         snapshot_hash: repair.proposal.snapshot_hash, created_at: repair.proposal.created_at,
         changed_paths: repair.proposal.changed_paths, patch_ref: repair.proposal.patch_ref,
         error: { code: "REPAIR_APPROVAL_FAILED" }
-      });
-      throw error;
+      }).catch(() => undefined);
+      throw new RepairApprovalError();
     }
   }
 
   async #withTrialLock<T>(key: string, operation: () => Promise<T>): Promise<T> {
-    const previous = this.#trialLocks.get(key) ?? Promise.resolve();
+    const previous = PROCESS_TRIAL_ALLOCATION_LOCKS.get(key) ?? Promise.resolve();
     const result = previous.then(operation, operation);
     const tail = result.then(() => undefined, () => undefined);
-    this.#trialLocks.set(key, tail);
+    PROCESS_TRIAL_ALLOCATION_LOCKS.set(key, tail);
     try {
       return await result;
     } finally {
-      if (this.#trialLocks.get(key) === tail) this.#trialLocks.delete(key);
+      if (PROCESS_TRIAL_ALLOCATION_LOCKS.get(key) === tail) {
+        PROCESS_TRIAL_ALLOCATION_LOCKS.delete(key);
+      }
     }
   }
 }

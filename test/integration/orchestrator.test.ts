@@ -18,10 +18,12 @@ import type {
 import { EventBus } from "../../src/core/events.js";
 import { importSkill } from "../../src/core/importer.js";
 import { RunOrchestrator } from "../../src/core/orchestrator.js";
+import { computeSnapshotExecutionFingerprint } from "../../src/core/snapshot-identity.js";
 import {
   canonicalJson,
   sha256,
-  type RunEnvelope
+  type RunEnvelope,
+  type SkillSnapshot
 } from "../../src/protocol/index.js";
 
 const manifestPath = fileURLToPath(new URL(
@@ -37,11 +39,15 @@ const missingToolManifestPath = fileURLToPath(new URL(
   import.meta.url
 ));
 
-function expectedLineage(loaded: Awaited<ReturnType<typeof loadManifest>>) {
+function expectedLineage(
+  loaded: Awaited<ReturnType<typeof loadManifest>>,
+  snapshot: SkillSnapshot
+) {
   return {
     manifest_hash: loaded.hash,
     fixture_hash: sha256(canonicalJson(loaded.manifest.fixture)),
-    runner: { adapter: "codex-cli" as const, model: "gpt-5.6" as const }
+    runner: { adapter: "codex-cli" as const, model: "gpt-5.6" as const },
+    snapshot_execution_fingerprint: computeSnapshotExecutionFingerprint(snapshot)
   };
 }
 
@@ -202,6 +208,7 @@ describe("RunOrchestrator", () => {
     const runStore = new CountingRunStore(path.join(root, "runs"));
     const eventBus = new EventBus();
     const published: number[] = [];
+    let providedSnapshot: SkillSnapshot = snapshot;
 
     const orchestrator = new RunOrchestrator({
       runStore,
@@ -218,7 +225,7 @@ describe("RunOrchestrator", () => {
       },
       async loadSnapshot(snapshotHash) {
         if (snapshotHash !== snapshot.source_hash) throw new Error("unknown snapshot");
-        return snapshot;
+        return providedSnapshot;
       }
     });
 
@@ -228,20 +235,38 @@ describe("RunOrchestrator", () => {
       run_group_id: "group_01",
       trial_index: 0,
       expected_lineage: {
-        ...expectedLineage(loadedManifest),
+        ...expectedLineage(loadedManifest, snapshot),
         manifest_hash: "f".repeat(64)
       }
     })).rejects.toThrow("expected lineage");
     expect(runStore.createCalls).toBe(0);
     await expect(readdir(path.join(root, "runs"))).rejects.toMatchObject({ code: "ENOENT" });
 
+    providedSnapshot = {
+      ...snapshot,
+      entrypoint: "nested/SKILL.md",
+      imported_path: `${snapshot.imported_path}-drifted`
+    };
+    await expect(orchestrator.createRun({
+      manifest_id: "repo-dirty-tree-v1",
+      snapshot_hash: snapshot.source_hash,
+      run_group_id: "group_01",
+      trial_index: 0,
+      expected_lineage: expectedLineage(loadedManifest, snapshot)
+    })).rejects.toThrow("expected lineage");
+    expect(runStore.createCalls).toBe(0);
+    await expect(readdir(path.join(root, "runs"))).rejects.toMatchObject({ code: "ENOENT" });
+    providedSnapshot = snapshot;
+
     const run = await orchestrator.createRun({
       manifest_id: "repo-dirty-tree-v1",
       snapshot_hash: snapshot.source_hash,
       run_group_id: "group_01",
       trial_index: 0,
-      expected_lineage: expectedLineage(loadedManifest)
+      expected_lineage: expectedLineage(loadedManifest, snapshot)
     });
+    expect(orchestrator.getRunContext(run.run_id).snapshot_execution_fingerprint)
+      .toBe(expectedLineage(loadedManifest, snapshot).snapshot_execution_fingerprint);
     eventBus.subscribe(run.run_id, (event) => {
       published.push(event.seq);
     });
@@ -304,7 +329,7 @@ describe("RunOrchestrator", () => {
       snapshot_hash: snapshot.source_hash,
       run_group_id: "group_error",
       trial_index: 0,
-      expected_lineage: expectedLineage(loadedManifest)
+      expected_lineage: expectedLineage(loadedManifest, snapshot)
     });
 
     const verdict = await orchestrator.execute(run.run_id);
@@ -428,7 +453,7 @@ describe("RunOrchestrator", () => {
       snapshot_hash: snapshot.source_hash,
       run_group_id: "group_cards",
       trial_index: 0,
-      expected_lineage: expectedLineage(loadedManifest)
+      expected_lineage: expectedLineage(loadedManifest, snapshot)
     });
 
     const verdict = await orchestrator.execute(run.run_id);
@@ -494,7 +519,7 @@ describe("RunOrchestrator", () => {
       snapshot_hash: snapshot.source_hash,
       run_group_id: "group_symlink",
       trial_index: 0,
-      expected_lineage: expectedLineage(loadedManifest)
+      expected_lineage: expectedLineage(loadedManifest, snapshot)
     });
 
     const verdict = await orchestrator.execute(run.run_id);
@@ -534,7 +559,7 @@ describe("RunOrchestrator", () => {
       snapshot_hash: snapshot.source_hash,
       run_group_id: "group_cleanup",
       trial_index: 0,
-      expected_lineage: expectedLineage(loadedManifest)
+      expected_lineage: expectedLineage(loadedManifest, snapshot)
     });
     expect((await orchestrator.execute(run.run_id)).status).toBe("victory");
     const workspace = path.join(workspaceRoot, run.run_id);
@@ -588,7 +613,7 @@ describe("RunOrchestrator", () => {
       snapshot_hash: snapshot.source_hash,
       run_group_id: "group_collision",
       trial_index: 0,
-      expected_lineage: expectedLineage(loadedManifest)
+      expected_lineage: expectedLineage(loadedManifest, snapshot)
     };
     const first = await orchestrator.createRun(request);
     const second = await orchestrator.createRun({ ...request, trial_index: 1 });
