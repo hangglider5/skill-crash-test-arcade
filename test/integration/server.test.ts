@@ -25,6 +25,7 @@ import {
   createProcessRepairRegistry,
   startCli
 } from "../../src/core/cli.js";
+import type { RepairProposal } from "../../src/core/repair.js";
 import {
   computeSnapshotExecutionFingerprint,
   computeSnapshotSourceHash
@@ -153,6 +154,18 @@ function repairRecord(overrides: Record<string, unknown> = {}): Record<string, u
     changed_paths: ["SKILL.md"],
     patch_ref: `sha256:${"d".repeat(64)}`,
     ...overrides
+  };
+}
+
+function repairProposal(): RepairProposal {
+  return {
+    repair_id: "repair_01",
+    run_id: "run_01",
+    status: "pending",
+    snapshot_hash: hashB,
+    created_at: "2026-07-15T00:02:00.000Z",
+    changed_paths: ["SKILL.md"],
+    patch_ref: `sha256:${"d".repeat(64)}`
   };
 }
 
@@ -963,16 +976,38 @@ describe("Loopback API", () => {
 });
 
 describe("startCli", () => {
+  it("normalizes a real pending repair proposal for strict report export", async () => {
+    const proposal = repairProposal();
+    const registry = createProcessRepairRegistry({
+      async createRepairFork() { return proposal; },
+      async approveAndRerun() { return envelope("created"); }
+    });
+
+    const returned = await registry.repairs.createRepairFork("run_01");
+    expect(returned).toBe(proposal);
+    expect(returned).not.toHaveProperty("schema");
+    expect(await registry.loadRepair("run_01")).toEqual({
+      schema: "arena.repair/v1",
+      ...proposal
+    });
+
+    const root = await temporaryRoot();
+    const app = await createServer(dependencies({ loadRepair: registry.loadRepair }), {
+      sessionToken: "test-token", appData: root, webDist: undefined
+    });
+    const response = await app.inject({
+      method: "GET", url: "/api/runs/run_01/report",
+      headers: { "x-arena-token": "test-token" }
+    });
+    expect(response.statusCode).toBe(200);
+    expect(response.json()).toMatchObject({
+      repair: { schema: "arena.repair/v1", status: "pending" }
+    });
+    await app.close();
+  });
+
   it("records a safe failed repair after approval rejects", async () => {
-    const proposal = {
-      repair_id: "repair_01",
-      run_id: "run_01",
-      status: "pending" as const,
-      snapshot_hash: hashB,
-      created_at: "2026-07-15T00:02:00.000Z",
-      changed_paths: ["SKILL.md"],
-      patch_ref: `sha256:${"d".repeat(64)}` as const
-    };
+    const proposal = repairProposal();
     const registry = createProcessRepairRegistry({
       async createRepairFork() { return proposal; },
       async approveAndRerun() {
@@ -983,6 +1018,7 @@ describe("startCli", () => {
     await registry.repairs.createRepairFork("run_01");
     await expect(registry.repairs.approveAndRerun("repair_01")).rejects.toThrow();
     expect(await registry.loadRepair("run_01")).toEqual({
+      schema: "arena.repair/v1",
       ...proposal,
       status: "failed",
       error: { code: "REPAIR_APPROVAL_FAILED" }
@@ -991,15 +1027,7 @@ describe("startCli", () => {
   });
 
   it("keeps an approved repair terminal and rejects repeated rerun without coordinator re-entry", async () => {
-    const proposal = repairRecord() as ReturnType<typeof repairRecord> & {
-      repair_id: string;
-      run_id: string;
-      status: "pending";
-      snapshot_hash: string;
-      created_at: string;
-      changed_paths: string[];
-      patch_ref: `sha256:${string}`;
-    };
+    const proposal = repairProposal();
     const child = { ...envelope("created"), run_id: "run_child", parent_run_id: "run_01" };
     const approveAndRerun = vi.fn(async () => child);
     const registry = createProcessRepairRegistry({
@@ -1014,22 +1042,29 @@ describe("startCli", () => {
     expect(approveAndRerun).toHaveBeenCalledTimes(1);
     expect(await registry.loadRepair("run_01")).toEqual(approved);
     expect(approved).toMatchObject({
+      schema: "arena.repair/v1",
       status: "approved",
       child_run_id: "run_child",
       new_snapshot_hash: hashB
     });
+
+    const root = await temporaryRoot();
+    const app = await createServer(dependencies({ loadRepair: registry.loadRepair }), {
+      sessionToken: "test-token", appData: root, webDist: undefined
+    });
+    const response = await app.inject({
+      method: "GET", url: "/api/runs/run_01/report",
+      headers: { "x-arena-token": "test-token" }
+    });
+    expect(response.statusCode).toBe(200);
+    expect(response.json()).toMatchObject({
+      repair: { schema: "arena.repair/v1", status: "approved" }
+    });
+    await app.close();
   });
 
   it("keeps a failed repair terminal and rejects repeated rerun without coordinator re-entry", async () => {
-    const proposal = repairRecord() as ReturnType<typeof repairRecord> & {
-      repair_id: string;
-      run_id: string;
-      status: "pending";
-      snapshot_hash: string;
-      created_at: string;
-      changed_paths: string[];
-      patch_ref: `sha256:${string}`;
-    };
+    const proposal = repairProposal();
     const approveAndRerun = vi.fn(async () => {
       throw new Error("first approval failed");
     });
@@ -1045,11 +1080,26 @@ describe("startCli", () => {
     expect(approveAndRerun).toHaveBeenCalledTimes(1);
     expect(await registry.loadRepair("run_01")).toEqual(failed);
     expect(failed).toMatchObject({
+      schema: "arena.repair/v1",
       status: "failed",
       error: { code: "REPAIR_APPROVAL_FAILED" }
     });
     expect(failed).not.toHaveProperty("child_run_id");
     expect(failed).not.toHaveProperty("new_snapshot_hash");
+
+    const root = await temporaryRoot();
+    const app = await createServer(dependencies({ loadRepair: registry.loadRepair }), {
+      sessionToken: "test-token", appData: root, webDist: undefined
+    });
+    const response = await app.inject({
+      method: "GET", url: "/api/runs/run_01/report",
+      headers: { "x-arena-token": "test-token" }
+    });
+    expect(response.statusCode).toBe(200);
+    expect(response.json()).toMatchObject({
+      repair: { schema: "arena.repair/v1", status: "failed" }
+    });
+    await app.close();
   });
 
   it("resolves manifests and production web assets from the installation root after chdir", async () => {

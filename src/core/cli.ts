@@ -59,7 +59,7 @@ export function createProcessRepairRegistry(
     repairs: {
       async createRepairFork(runId) {
         const value = await coordinator.createRepairFork(runId);
-        records.set(runId, value);
+        records.set(runId, { schema: "arena.repair/v1", ...value });
         owners.set(value.repair_id, runId);
         return value;
       },
