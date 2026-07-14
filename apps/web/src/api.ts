@@ -3,10 +3,16 @@ import { z } from "zod";
 import {
   ArtifactRefSchema,
   DiagnosisSchema,
+  DimensionResultSchema,
+  EvidenceRefSchema,
+  FileRecordSchema,
   HashSchema,
+  PhaseSchema,
   RunEnvelopeSchema,
   SkillContractSchema,
   SkillSnapshotSchema,
+  TraceKindSchema,
+  VerifierResultSchema,
   type Diagnosis,
   type RunEnvelope,
   type SkillContract,
@@ -72,14 +78,92 @@ const RepairProposalSchema = z.object({
   patch_ref: ArtifactRefSchema
 }).strict();
 
-const ArenaReportSchema = z.object({
+export const SanitizedSnapshotSchema = z.object({
+  schema: z.literal("arena.skill-snapshot/v1"),
+  source: z.object({
+    kind: z.enum(["local", "git", "zip", "sample"]),
+    revision: z.string().optional()
+  }).strict(),
+  entrypoint: z.string().min(1),
+  license: z.string().min(1),
+  files: z.array(FileRecordSchema).min(1),
+  source_hash: HashSchema,
+  contract_ref: ArtifactRefSchema.optional()
+}).strict();
+
+const SanitizedVerdictBase = {
+  schema: z.literal("arena.verdict/v1"),
+  run_id: z.string().min(1),
+  hard_gate_failures: z.array(z.string()),
+  dimensions: z.array(DimensionResultSchema),
+  verifier_results: z.array(VerifierResultSchema),
+  evidence: z.array(EvidenceRefSchema)
+};
+
+export const SanitizedVerdictSchema = z.discriminatedUnion("status", [
+  z.object({
+    ...SanitizedVerdictBase,
+    status: z.enum(["victory", "defeat"]),
+    score: z.number().min(0).max(100)
+  }).strict(),
+  z.object({
+    ...SanitizedVerdictBase,
+    status: z.literal("error"),
+    error: z.object({ code: z.string() }).strict()
+  }).strict()
+]);
+
+export const SanitizedTraceSchema = z.object({
+  v: z.literal(1),
+  run_id: z.string().min(1),
+  seq: z.number().int().nonnegative(),
+  phase: PhaseSchema,
+  kind: TraceKindSchema,
+  actor: z.enum(["arena", "codex", "verifier", "gpt-5.6"]),
+  span_id: z.string().min(1).optional(),
+  artifacts: z.array(ArtifactRefSchema)
+}).strict();
+
+const PortableRepairPathSchema = z.string().min(1).refine((value) => {
+  if (value.startsWith("/") || value.includes("\\")) return false;
+  return value.split("/").every((part) => part.length > 0 && part !== "." && part !== "..");
+}, "Repair changed path must be portable");
+
+const SanitizedRepairBase = {
+  schema: z.literal("arena.repair/v1"),
+  repair_id: z.string().min(1),
+  run_id: z.string().min(1),
+  snapshot_hash: HashSchema,
+  created_at: z.string().datetime(),
+  changed_paths: z.array(PortableRepairPathSchema),
+  patch_ref: ArtifactRefSchema
+};
+
+export const SanitizedRepairSchema = z.discriminatedUnion("status", [
+  z.object({ ...SanitizedRepairBase, status: z.literal("pending") }).strict(),
+  z.object({
+    ...SanitizedRepairBase,
+    status: z.literal("approved"),
+    child_run_id: z.string().min(1),
+    new_snapshot_hash: HashSchema
+  }).strict(),
+  z.object({
+    ...SanitizedRepairBase,
+    status: z.literal("failed"),
+    error: z.object({ code: z.string().min(1) }).strict()
+  }).strict()
+]);
+
+export const ArenaReportSchema = z.object({
   schema: z.literal("arena.report/v1"),
   run: RunEnvelopeSchema,
   manifest_id: z.string().min(1),
-  snapshot: z.record(z.string(), z.unknown()),
-  verdict: z.record(z.string(), z.unknown()),
-  trace: z.array(z.record(z.string(), z.unknown()))
-}).passthrough();
+  snapshot: SanitizedSnapshotSchema,
+  verdict: SanitizedVerdictSchema,
+  diagnosis: DiagnosisSchema.optional(),
+  repair: SanitizedRepairSchema.optional(),
+  trace: z.array(SanitizedTraceSchema)
+}).strict();
 
 const SafeErrorSchema = z.object({
   error: z.object({ code: z.string(), message: z.string() }).strict()
@@ -95,6 +179,10 @@ const SAFE_ERROR_MESSAGES = new Map<string, string>([
 export type PreflightResult = z.infer<typeof PreflightResultSchema>;
 export type ReplayManifest = z.infer<typeof ReplayManifestSchema>;
 export type RepairProposal = z.infer<typeof RepairProposalSchema>;
+export type SanitizedSnapshot = z.infer<typeof SanitizedSnapshotSchema>;
+export type SanitizedVerdict = z.infer<typeof SanitizedVerdictSchema>;
+export type SanitizedTrace = z.infer<typeof SanitizedTraceSchema>;
+export type SanitizedRepair = z.infer<typeof SanitizedRepairSchema>;
 export type ArenaReport = z.infer<typeof ArenaReportSchema>;
 
 export class ApiError extends Error {

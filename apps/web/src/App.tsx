@@ -39,6 +39,7 @@ export function App(): React.JSX.Element {
   useLayoutEffect(() => {
     if (!sessionToken.present) return;
     const url = new URL(window.location.href);
+    if (!url.searchParams.has("token")) return;
     url.searchParams.delete("token");
     window.history.replaceState(
       window.history.state,

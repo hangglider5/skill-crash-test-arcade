@@ -6,6 +6,97 @@ import { App } from "../../apps/web/src/App.js";
 import { ApiError, ArenaApi } from "../../apps/web/src/api.js";
 
 const hash = "a".repeat(64);
+const hashB = "b".repeat(64);
+
+function runRecord(): Record<string, unknown> {
+  return {
+    schema: "arena.run/v1",
+    run_id: "run/01",
+    run_group_id: "group_01",
+    trial_index: 0,
+    manifest_hash: hash,
+    snapshot_hash: hash,
+    fixture_hash: hash,
+    runner: { adapter: "codex-cli", model: "gpt-5.6" },
+    state: "completed",
+    started_at: "2026-07-15T00:00:00.000Z",
+    ended_at: "2026-07-15T00:01:00.000Z"
+  };
+}
+
+function sanitizedRepair(status: "pending" | "approved" | "failed"): Record<string, unknown> {
+  const base = {
+    schema: "arena.repair/v1",
+    repair_id: "repair/01",
+    run_id: "run/01",
+    status,
+    snapshot_hash: hash,
+    created_at: "2026-07-15T00:02:00.000Z",
+    changed_paths: ["SKILL.md"],
+    patch_ref: `sha256:${hash}`
+  };
+  if (status === "approved") {
+    return { ...base, child_run_id: "run_child", new_snapshot_hash: hashB };
+  }
+  if (status === "failed") {
+    return { ...base, error: { code: "REPAIR_APPROVAL_FAILED" } };
+  }
+  return base;
+}
+
+function sanitizedReport(options: {
+  readonly repair?: Record<string, unknown>;
+  readonly errorVerdict?: boolean;
+} = {}): Record<string, unknown> {
+  const verdictBase = {
+    schema: "arena.verdict/v1",
+    run_id: "run/01",
+    hard_gate_failures: [],
+    dimensions: [{ id: "task_correctness", earned: 8, possible: 10, evidence: ["event:0"] }],
+    verifier_results: [{
+      id: "preserve", passed: true, hard_gate: true, message: "passed", evidence: ["event:0"]
+    }],
+    evidence: ["event:0"]
+  };
+  return {
+    schema: "arena.report/v1",
+    run: runRecord(),
+    manifest_id: "repo-dirty-tree-v1",
+    snapshot: {
+      schema: "arena.skill-snapshot/v1",
+      source: { kind: "git", revision: "main" },
+      entrypoint: "SKILL.md",
+      license: "MIT",
+      files: [{ path: "SKILL.md", bytes: 8, sha256: hash }],
+      source_hash: hash,
+      contract_ref: `sha256:${hashB}`
+    },
+    verdict: options.errorVerdict
+      ? { ...verdictBase, status: "error", error: { code: "RUN_FAILED" } }
+      : { ...verdictBase, status: "defeat", score: 80 },
+    diagnosis: {
+      schema: "arena.diagnosis/v1",
+      run_id: "run/01",
+      model: "gpt-5.6",
+      observed_failure: "failure",
+      likely_skill_gap: "gap",
+      retry_analysis: "retry",
+      suggested_changes: ["change"],
+      evidence_refs: ["event:0"]
+    },
+    ...(options.repair === undefined ? {} : { repair: options.repair }),
+    trace: [{
+      v: 1,
+      run_id: "run/01",
+      seq: 0,
+      phase: "judge",
+      kind: "run.finished",
+      actor: "arena",
+      span_id: "span_01",
+      artifacts: [`sha256:${hash}`]
+    }]
+  };
+}
 
 afterEach(() => {
   vi.restoreAllMocks();
@@ -37,9 +128,11 @@ describe("App", () => {
     const getItem = vi.spyOn(Storage.prototype, "getItem");
     const setItem = vi.spyOn(Storage.prototype, "setItem");
     window.history.replaceState({}, "", "/?foo=1&token=arena-secret#hash");
+    const replaceState = vi.spyOn(window.history, "replaceState");
 
     render(<StrictMode><App /></StrictMode>);
 
+    expect(replaceState).toHaveBeenCalledTimes(1);
     expect(window.location.search).toBe("?foo=1");
     expect(window.location.hash).toBe("#hash");
     expect(window.location.href).not.toContain("arena-secret");
@@ -73,18 +166,7 @@ describe("ArenaApi", () => {
       source_hash: hash,
       imported_path: "/redacted/import"
     };
-    const run = {
-      schema: "arena.run/v1",
-      run_id: "run/01",
-      run_group_id: "group_01",
-      trial_index: 0,
-      manifest_hash: hash,
-      snapshot_hash: hash,
-      fixture_hash: hash,
-      runner: { adapter: "codex-cli", model: "gpt-5.6" },
-      state: "created",
-      started_at: "2026-07-15T00:00:00.000Z"
-    };
+    const run = { ...runRecord(), state: "created", ended_at: undefined };
     const responses = new Map<string, unknown>([
       ["GET /api/health", {
         ok: true,
@@ -126,14 +208,7 @@ describe("ArenaApi", () => {
         patch_ref: `sha256:${hash}`
       }],
       ["POST /api/repairs/repair%2F01/rerun", { ...run, parent_run_id: "run/01" }],
-      ["GET /api/runs/run%2F01/report", {
-        schema: "arena.report/v1",
-        run,
-        manifest_id: "repo-dirty-tree-v1",
-        snapshot: {},
-        verdict: {},
-        trace: []
-      }]
+      ["GET /api/runs/run%2F01/report", sanitizedReport()]
     ]);
     const fetchMock = vi.fn<typeof fetch>(async (input, init) => {
       const method = init?.method ?? "GET";
@@ -245,6 +320,47 @@ describe("ArenaApi", () => {
     expect(headers.get("x-arena-token")).toBe("arena-token");
     expect(headers.has("content-type")).toBe(false);
     expect(init?.body).toBeInstanceOf(FormData);
+  });
+
+  it.each([
+    ["pending repair", sanitizedReport({ repair: sanitizedRepair("pending") })],
+    ["approved repair", sanitizedReport({ repair: sanitizedRepair("approved") })],
+    ["failed repair", sanitizedReport({ repair: sanitizedRepair("failed") })],
+    ["error verdict", sanitizedReport({ errorVerdict: true })]
+  ])("parses a real sanitized report with %s", async (_label, report) => {
+    const fetchMock = vi.fn<typeof fetch>().mockResolvedValue(new Response(
+      JSON.stringify(report),
+      { status: 200, headers: { "content-type": "application/json" } }
+    ));
+    const api = new ArenaApi("arena-token", { fetch: fetchMock });
+
+    await expect(api.report("run/01")).resolves.toEqual(report);
+  });
+
+  it.each([
+    ["raw trace data", (() => {
+      const report = sanitizedReport();
+      (report.trace as Array<Record<string, unknown>>)[0]!.data = { private: "server-secret" };
+      return report;
+    })()],
+    ["snapshot imported path", (() => {
+      const report = sanitizedReport();
+      (report.snapshot as Record<string, unknown>).imported_path = "/private/import";
+      return report;
+    })()],
+    ["unknown report field", { ...sanitizedReport(), unexpected: "server-secret" }]
+  ])("rejects %s as an invalid report response", async (_label, report) => {
+    const fetchMock = vi.fn<typeof fetch>().mockResolvedValue(new Response(
+      JSON.stringify(report),
+      { status: 200, headers: { "content-type": "application/json" } }
+    ));
+    const api = new ArenaApi("arena-token", { fetch: fetchMock });
+
+    await expect(api.report("run/01")).rejects.toMatchObject({
+      status: 200,
+      code: "INVALID_RESPONSE",
+      message: "Invalid response from Arena"
+    });
   });
 
   it.each([
