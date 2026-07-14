@@ -1,9 +1,10 @@
 import { randomUUID } from "node:crypto";
 import {
-  access,
+  link,
+  lstat,
   mkdir,
   readFile,
-  rename,
+  realpath,
   rm,
   writeFile
 } from "node:fs/promises";
@@ -27,39 +28,56 @@ export interface ArtifactRecord extends ArtifactMetadata {
   bytes: number;
 }
 
-async function pathExists(filePath: string): Promise<boolean> {
-  try {
-    await access(filePath);
-    return true;
-  } catch (error) {
-    if ((error as NodeJS.ErrnoException).code === "ENOENT") {
-      return false;
-    }
-
-    throw error;
+async function readRegularFile(filePath: string): Promise<Buffer> {
+  const stats = await lstat(filePath);
+  if (stats.isSymbolicLink()) {
+    throw new Error(`Artifact path must not be a symbolic link: ${filePath}`);
   }
+  if (!stats.isFile()) {
+    throw new Error(`Artifact path must be a regular file: ${filePath}`);
+  }
+
+  return readFile(filePath);
 }
 
-async function writeAtomically(
+function directChild(root: string, name: string): string {
+  const child = path.resolve(root, name);
+  if (path.dirname(child) !== root || path.basename(child) !== name) {
+    throw new Error(`Artifact path escapes configured root: ${name}`);
+  }
+
+  return child;
+}
+
+async function publishExclusively(
   destination: string,
   data: string | Uint8Array
-): Promise<void> {
+): Promise<boolean> {
   const temporaryPath = `${destination}.${randomUUID()}.tmp`;
 
   try {
     await writeFile(temporaryPath, data, { flag: "wx" });
-    await rename(temporaryPath, destination);
+    try {
+      await link(temporaryPath, destination);
+      return true;
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === "EEXIST") {
+        return false;
+      }
+      throw error;
+    }
   } finally {
     await rm(temporaryPath, { force: true });
   }
 }
 
 export class ArtifactStore {
-  readonly #root: string;
+  readonly #configuredRoot: string;
+  #canonicalRoot: Promise<string> | undefined;
   readonly #writeLocks = new Map<string, Promise<void>>();
 
   constructor(root: string) {
-    this.#root = path.resolve(root);
+    this.#configuredRoot = path.resolve(root);
   }
 
   async put(
@@ -71,10 +89,10 @@ export class ArtifactStore {
     const ref = ArtifactRefSchema.parse(`sha256:${digest}`);
 
     return this.#withWriteLock(digest, async () => {
-      await mkdir(this.#root, { recursive: true });
+      const root = await this.#rootDirectory();
 
-      const artifactPath = path.join(this.#root, digest);
-      const metadataPath = path.join(this.#root, `${digest}.json`);
+      const artifactPath = directChild(root, digest);
+      const metadataPath = directChild(root, `${digest}.json`);
       const record: ArtifactRecord = {
         ref,
         sha256: digest,
@@ -83,17 +101,15 @@ export class ArtifactStore {
         redacted: metadata.redacted
       };
 
-      if (!(await pathExists(artifactPath))) {
-        await writeAtomically(artifactPath, bytes);
-      }
+      await publishExclusively(artifactPath, bytes);
+      await this.#readVerifiedArtifact(artifactPath, digest);
 
-      if (await pathExists(metadataPath)) {
-        const existing = JSON.parse(await readFile(metadataPath, "utf8")) as unknown;
-        if (canonicalJson(existing) !== canonicalJson(record)) {
-          throw new Error(`Artifact metadata mismatch for ${ref}`);
-        }
-      } else {
-        await writeAtomically(metadataPath, `${canonicalJson(record)}\n`);
+      await publishExclusively(metadataPath, `${canonicalJson(record)}\n`);
+      const existing = JSON.parse(
+        (await readRegularFile(metadataPath)).toString("utf8")
+      ) as unknown;
+      if (canonicalJson(existing) !== canonicalJson(record)) {
+        throw new Error(`Artifact metadata mismatch for ${ref}`);
       }
 
       return record;
@@ -107,7 +123,37 @@ export class ArtifactStore {
     }
 
     const digest = parsed.data.slice("sha256:".length);
-    return readFile(path.join(this.#root, digest));
+    const root = await this.#rootDirectory();
+    return this.#readVerifiedArtifact(directChild(root, digest), digest);
+  }
+
+  async #rootDirectory(): Promise<string> {
+    this.#canonicalRoot ??= (async () => {
+      await mkdir(this.#configuredRoot, { recursive: true });
+      const root = await realpath(this.#configuredRoot);
+      const stats = await lstat(root);
+      if (!stats.isDirectory()) {
+        throw new Error(`Artifact root is not a directory: ${root}`);
+      }
+      return root;
+    })();
+
+    return this.#canonicalRoot;
+  }
+
+  async #readVerifiedArtifact(
+    artifactPath: string,
+    expectedDigest: string
+  ): Promise<Buffer> {
+    const bytes = await readRegularFile(artifactPath);
+    const actualDigest = sha256(bytes);
+    if (actualDigest !== expectedDigest) {
+      throw new Error(
+        `Artifact digest mismatch: expected ${expectedDigest}, received ${actualDigest}`
+      );
+    }
+
+    return bytes;
   }
 
   async #withWriteLock<T>(digest: string, operation: () => Promise<T>): Promise<T> {

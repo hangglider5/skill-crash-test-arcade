@@ -1,4 +1,12 @@
-import { access, mkdtemp, readFile, rm } from "node:fs/promises";
+import {
+  access,
+  mkdir,
+  mkdtemp,
+  readFile,
+  rm,
+  symlink,
+  writeFile
+} from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 
@@ -76,6 +84,19 @@ describe("RunStore", () => {
       .rejects.toThrow("expected seq 1, received 2");
   });
 
+  it("recovers its append chain after a rejected sequence", async () => {
+    const root = await createTemporaryRoot("scta-runs-");
+    const store = new RunStore(root);
+    await store.create(validRunEnvelope("run_01"));
+    await store.appendEvent("run_01", validEvent("run_01", 0));
+
+    await expect(store.appendEvent("run_01", validEvent("run_01", 2)))
+      .rejects.toThrow("expected seq 1, received 2");
+    await store.appendEvent("run_01", validEvent("run_01", 1));
+
+    expect((await store.readEvents("run_01")).map(({ seq }) => seq)).toEqual([0, 1]);
+  });
+
   it("serializes concurrent appends and reads parsed events", async () => {
     const root = await createTemporaryRoot("scta-runs-");
     const store = new RunStore(root);
@@ -120,6 +141,92 @@ describe("RunStore", () => {
     )).rejects.toThrow("Unsupported run record: ../outside.json");
   });
 
+  it("validates run.json and preserves the requested run identity", async () => {
+    const root = await createTemporaryRoot("scta-runs-");
+    const store = new RunStore(root);
+    const original = validRunEnvelope("run_01");
+    await store.create(original);
+    const runPath = path.join(root, "run_01", "run.json");
+
+    await expect(store.writeRecord("run_01", "run.json", {
+      ...original,
+      state: "not-a-run-state"
+    })).rejects.toThrow();
+    await expect(store.writeRecord(
+      "run_01",
+      "run.json",
+      validRunEnvelope("run_02")
+    )).rejects.toThrow(/run_id run_02 does not match run_01/i);
+    expect(JSON.parse(await readFile(runPath, "utf8"))).toEqual(original);
+
+    const updated = { ...original, state: "running" as const };
+    await store.writeRecord("run_01", "run.json", updated);
+    expect(JSON.parse(await readFile(runPath, "utf8"))).toEqual(updated);
+  });
+
+  it("rejects empty interior Trace lines", async () => {
+    const root = await createTemporaryRoot("scta-runs-");
+    const store = new RunStore(root);
+    await store.create(validRunEnvelope("run_01"));
+    const tracePath = path.join(root, "run_01", "trace.jsonl");
+    await writeFile(
+      tracePath,
+      `${JSON.stringify(validEvent("run_01", 0))}\n\n${JSON.stringify(
+        validEvent("run_01", 1)
+      )}\n`
+    );
+
+    await expect(store.readEvents("run_01")).rejects.toThrow(/empty line.*2/i);
+  });
+
+  it("rejects a persisted sequence gap and does not extend the Trace", async () => {
+    const root = await createTemporaryRoot("scta-runs-");
+    const store = new RunStore(root);
+    await store.create(validRunEnvelope("run_01"));
+    const tracePath = path.join(root, "run_01", "trace.jsonl");
+    const corrupted = `${JSON.stringify(validEvent("run_01", 0))}\n${JSON.stringify(
+      validEvent("run_01", 2)
+    )}\n`;
+    await writeFile(tracePath, corrupted);
+
+    await expect(store.readEvents("run_01"))
+      .rejects.toThrow(/expected seq 1, received 2/i);
+    await expect(store.appendEvent("run_01", validEvent("run_01", 3)))
+      .rejects.toThrow(/expected seq 1, received 2/i);
+    expect(await readFile(tracePath, "utf8")).toBe(corrupted);
+  });
+
+  it("rejects a persisted event belonging to another run", async () => {
+    const root = await createTemporaryRoot("scta-runs-");
+    const store = new RunStore(root);
+    await store.create(validRunEnvelope("run_01"));
+    const tracePath = path.join(root, "run_01", "trace.jsonl");
+    const corrupted = `${JSON.stringify(validEvent("run_02", 0))}\n`;
+    await writeFile(tracePath, corrupted);
+
+    await expect(store.readEvents("run_01"))
+      .rejects.toThrow(/event run_id run_02 does not match run_01/i);
+    await expect(store.appendEvent("run_01", validEvent("run_01", 1)))
+      .rejects.toThrow(/event run_id run_02 does not match run_01/i);
+    expect(await readFile(tracePath, "utf8")).toBe(corrupted);
+  });
+
+  it("rejects a symbolic-link Trace file", async () => {
+    const root = await createTemporaryRoot("scta-runs-");
+    const outside = await createTemporaryRoot("scta-runs-outside-");
+    const store = new RunStore(root);
+    await store.create(validRunEnvelope("run_01"));
+    const tracePath = path.join(root, "run_01", "trace.jsonl");
+    const outsideTrace = path.join(outside, "trace.jsonl");
+    await writeFile(outsideTrace, "");
+    await rm(tracePath);
+    await symlink(outsideTrace, tracePath);
+
+    await expect(store.appendEvent("run_01", validEvent("run_01", 0)))
+      .rejects.toThrow(/symbolic link/i);
+    expect(await readFile(outsideTrace, "utf8")).toBe("");
+  });
+
   it("rejects run identifiers that escape the configured root", async () => {
     const root = await createTemporaryRoot("scta-runs-");
     const store = new RunStore(root);
@@ -128,5 +235,41 @@ describe("RunStore", () => {
     await expect(store.create(validRunEnvelope(`../${escapedName}`)))
       .rejects.toThrow("Invalid run id");
     await expect(access(path.join(root, "..", escapedName))).rejects.toThrow();
+  });
+
+  it("rejects appending through a symbolic-link run directory", async () => {
+    const root = await createTemporaryRoot("scta-runs-");
+    const outside = await createTemporaryRoot("scta-runs-outside-");
+    const outsideRun = path.join(outside, "run_01");
+    await mkdir(outsideRun);
+    await writeFile(
+      path.join(outsideRun, "run.json"),
+      `${JSON.stringify(validRunEnvelope("run_01"))}\n`
+    );
+    await writeFile(path.join(outsideRun, "trace.jsonl"), "");
+    await symlink(outsideRun, path.join(root, "run_01"), "dir");
+    const store = new RunStore(root);
+
+    await expect(store.appendEvent("run_01", validEvent("run_01", 0)))
+      .rejects.toThrow(/symbolic link/i);
+    expect(await readFile(path.join(outsideRun, "trace.jsonl"), "utf8")).toBe("");
+  });
+
+  it("rejects writing a record through a symbolic-link run directory", async () => {
+    const root = await createTemporaryRoot("scta-runs-");
+    const outside = await createTemporaryRoot("scta-runs-outside-");
+    const outsideRun = path.join(outside, "run_01");
+    await mkdir(outsideRun);
+    await writeFile(
+      path.join(outsideRun, "run.json"),
+      `${JSON.stringify(validRunEnvelope("run_01"))}\n`
+    );
+    await writeFile(path.join(outsideRun, "trace.jsonl"), "");
+    await symlink(outsideRun, path.join(root, "run_01"), "dir");
+    const store = new RunStore(root);
+
+    await expect(store.writeRecord("run_01", "verdict.json", {}))
+      .rejects.toThrow(/symbolic link/i);
+    await expect(access(path.join(outsideRun, "verdict.json"))).rejects.toThrow();
   });
 });

@@ -1,4 +1,11 @@
-import { mkdtemp, readFile, readdir, rm } from "node:fs/promises";
+import {
+  mkdtemp,
+  readFile,
+  readdir,
+  rm,
+  symlink,
+  writeFile
+} from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 
@@ -83,11 +90,93 @@ describe("ArtifactStore", () => {
       .rejects.toThrow(`metadata mismatch for ${first.ref}`);
   });
 
+  it("atomically chooses one metadata record across store instances", async () => {
+    const root = await createTemporaryRoot("scta-artifacts-");
+    const data = Buffer.from("shared across instances");
+    const attempts = await Promise.allSettled([
+      new ArtifactStore(root).put(data, {
+        mime: "text/plain",
+        redacted: false
+      }),
+      new ArtifactStore(root).put(data, {
+        mime: "application/octet-stream",
+        redacted: true
+      })
+    ]);
+
+    const fulfilled = attempts.filter((attempt) => attempt.status === "fulfilled");
+    const rejected = attempts.filter((attempt) => attempt.status === "rejected");
+    expect(fulfilled).toHaveLength(1);
+    expect(rejected).toHaveLength(1);
+
+    const winner = fulfilled[0];
+    expect(winner?.status).toBe("fulfilled");
+    if (winner?.status !== "fulfilled") {
+      throw new Error("Expected one metadata writer to succeed");
+    }
+    const digest = sha256(data);
+    expect(JSON.parse(await readFile(path.join(root, `${digest}.json`), "utf8")))
+      .toEqual(winner.value);
+  });
+
   it("rejects malformed references before resolving a filesystem path", async () => {
     const root = await createTemporaryRoot("scta-artifacts-");
     const store = new ArtifactStore(root);
     const malformed = "sha256:../outside" as ArtifactRef;
 
     await expect(store.read(malformed)).rejects.toThrow("Invalid artifact reference");
+  });
+
+  it("rejects a digest path that is a symbolic link", async () => {
+    const root = await createTemporaryRoot("scta-artifacts-");
+    const outside = await createTemporaryRoot("scta-artifacts-outside-");
+    const data = Buffer.from("outside evidence");
+    const digest = sha256(data);
+    const outsidePath = path.join(outside, "evidence.txt");
+    await writeFile(outsidePath, data);
+    await symlink(outsidePath, path.join(root, digest));
+    const store = new ArtifactStore(root);
+
+    await expect(store.read(`sha256:${digest}`)).rejects.toThrow(/symbolic link/i);
+  });
+
+  it("rejects a symbolic-link artifact on put instead of trusting its bytes", async () => {
+    const root = await createTemporaryRoot("scta-artifacts-");
+    const outside = await createTemporaryRoot("scta-artifacts-outside-");
+    const data = Buffer.from("expected evidence");
+    const digest = sha256(data);
+    const outsidePath = path.join(outside, "replacement.txt");
+    await writeFile(outsidePath, "replacement");
+    await symlink(outsidePath, path.join(root, digest));
+    const store = new ArtifactStore(root);
+
+    await expect(store.put(data, { mime: "text/plain", redacted: true }))
+      .rejects.toThrow(/symbolic link/i);
+  });
+
+  it("rejects corrupted stored bytes when reading an artifact", async () => {
+    const root = await createTemporaryRoot("scta-artifacts-");
+    const store = new ArtifactStore(root);
+    const record = await store.put(Buffer.from("original"), {
+      mime: "text/plain",
+      redacted: false
+    });
+    await writeFile(path.join(root, record.sha256), "tampered");
+
+    await expect(store.read(record.ref)).rejects.toThrow(/digest mismatch/i);
+  });
+
+  it("rejects corrupted stored bytes on a repeated put", async () => {
+    const root = await createTemporaryRoot("scta-artifacts-");
+    const store = new ArtifactStore(root);
+    const data = Buffer.from("original");
+    const record = await store.put(data, {
+      mime: "text/plain",
+      redacted: false
+    });
+    await writeFile(path.join(root, record.sha256), "tampered");
+
+    await expect(store.put(data, { mime: "text/plain", redacted: false }))
+      .rejects.toThrow(/digest mismatch/i);
   });
 });
