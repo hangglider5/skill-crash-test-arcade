@@ -32,6 +32,62 @@ describe("runPreflight", () => {
     expect(result.model).toEqual({ target: "gpt-5.6", status: "configured-unverified" });
   });
 
+  it.each([
+    "Not logged in",
+    "not logged in",
+    "User is Not logged in",
+    "warning: Not logged in\n"
+  ])("does not treat exit-zero negative auth output as success: %s", async (loginOutput) => {
+    const appDataDir = await mkdtemp(path.join(tmpdir(), "scta-preflight-"));
+    roots.push(appDataDir);
+    const result = await runPreflight({
+      appDataDir,
+      execute: async (command, args) => command === "codex" && args[0] === "--version"
+        ? { exit_code: 0, stdout: "codex-cli 0.144.2", stderr: "" }
+        : command === "codex"
+          ? { exit_code: 0, stdout: loginOutput, stderr: "" }
+          : { exit_code: 0, stdout: "git version 2.53.0", stderr: "" }
+    });
+    expect(result.checks.find((check) => check.id === "codex-login")).toMatchObject({ ok: false, message: "Codex login is required" });
+  });
+
+  it("passes bounds to every injected command and externally bounds a hung executor", async () => {
+    const appDataDir = await mkdtemp(path.join(tmpdir(), "scta-preflight-"));
+    roots.push(appDataDir);
+    const calls: unknown[] = [];
+    const started = Date.now();
+    const result = await runPreflight({
+      appDataDir,
+      commandTimeoutMs: 10,
+      maxStdoutBytes: 64,
+      maxStderrBytes: 32,
+      killGraceMs: 5,
+      execute: (_command, _args, limits) => {
+        calls.push(limits);
+        return new Promise(() => {});
+      }
+    });
+    expect(Date.now() - started).toBeLessThan(500);
+    expect(calls).toHaveLength(3);
+    expect(calls).toEqual(Array(3).fill({ timeout_ms: 10, max_stdout_bytes: 64, max_stderr_bytes: 32, kill_grace_ms: 5 }));
+    expect(result.ok).toBe(false);
+    expect(result.checks.slice(0, 3).every((check) => !check.ok)).toBe(true);
+  });
+
+  it("rejects noisy injected command results without retaining their raw output", async () => {
+    const appDataDir = await mkdtemp(path.join(tmpdir(), "scta-preflight-"));
+    roots.push(appDataDir);
+    const result = await runPreflight({
+      appDataDir,
+      maxStdoutBytes: 16,
+      maxStderrBytes: 16,
+      execute: async () => ({ exit_code: 0, stdout: "private".repeat(100), stderr: "secret".repeat(100) })
+    });
+    expect(result.ok).toBe(false);
+    expect(JSON.stringify(result)).not.toContain("private");
+    expect(JSON.stringify(result)).not.toContain("secret");
+  });
+
   it("rejects Codex older than 0.144.2", async () => {
     const appDataDir = await mkdtemp(path.join(tmpdir(), "scta-preflight-"));
     roots.push(appDataDir);

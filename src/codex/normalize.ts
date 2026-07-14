@@ -110,7 +110,9 @@ function buildEvent(
   return event;
 }
 
-export async function normalizeCodexEvent(
+const contextQueues = new WeakMap<NormalizeContext, Promise<void>>();
+
+async function normalizeOne(
   candidate: unknown,
   context: NormalizeContext
 ): Promise<TraceEvent[]> {
@@ -178,4 +180,21 @@ export async function normalizeCodexEvent(
   }
 
   return [buildEvent(context, "runner.raw", "codex", safeRawProjection(raw), itemId)];
+}
+
+export function normalizeCodexEvent(
+  candidate: unknown,
+  context: NormalizeContext
+): Promise<TraceEvent[]> {
+  const previous = contextQueues.get(context) ?? Promise.resolve();
+  const result = previous.then(
+    () => normalizeOne(candidate, context),
+    () => normalizeOne(candidate, context)
+  );
+  const tail = result.then(() => undefined, () => undefined);
+  contextQueues.set(context, tail);
+  void tail.then(() => {
+    if (contextQueues.get(context) === tail) contextQueues.delete(context);
+  });
+  return result;
 }

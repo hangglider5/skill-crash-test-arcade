@@ -19,6 +19,13 @@ if (prompt === "timeout") {
   setInterval(() => {}, 1_000);
 } else if (prompt === "invalid-json") {
   process.stdout.write('not secret: hidden payload\n{"type":"thread.started","thread_id":"must_not_emit"}\n');
+} else if (prompt === "invalid-json-ignore-term") {
+  process.on("SIGTERM", () => {});
+  process.stdout.write('not secret: hidden payload\n');
+  setInterval(() => {}, 1_000);
+} else if (prompt === "one-event") {
+  process.stdout.write('{"type":"thread.started","thread_id":"thread_fake"}\n');
+  await writeFile(outputPath, '{"completed":true,"summary":"ok"}');
 } else if (prompt === "final-no-newline") {
   process.stdout.write('{"type":"thread.started","thread_id":"thread_fake"}');
   await writeFile(outputPath, '{"completed":true,"summary":"ok"}');
@@ -38,6 +45,8 @@ if (prompt === "timeout") {
   process.stdout.write('{"type":"thread.started","thread_id":"thread_fake"}\n');
 } else if (prompt === "invalid-output") {
   await writeFile(outputPath, "not json");
+} else if (prompt === "oversize-output") {
+  await writeFile(outputPath, JSON.stringify({ value: "x".repeat(4096) }));
 } else if (prompt === "exit-7") {
   process.stderr.write("private stderr");
   process.exitCode = 7;

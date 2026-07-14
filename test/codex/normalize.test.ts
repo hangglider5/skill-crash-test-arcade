@@ -75,4 +75,45 @@ describe("normalizeCodexEvent", () => {
     expect(JSON.stringify(event)).not.toContain("secret");
     expect(JSON.stringify(event)).not.toContain("hidden");
   });
+
+  it("serializes concurrent calls per context while a prior artifact sink is slow", async () => {
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => { release = resolve; });
+    const sink: ArtifactSink = {
+      put: async () => {
+        await gate;
+        return { ref: `sha256:${"b".repeat(64)}` as const };
+      }
+    };
+    const ctx = context({ artifact_sink: sink, max_inline_output_bytes: 4 });
+    const first = normalizeCodexEvent({
+      type: "item.completed",
+      item: { id: "first", type: "command_execution", command: "first", aggregated_output: "slow output", exit_code: 0 }
+    }, ctx);
+    const second = normalizeCodexEvent({ type: "thread.started", thread_id: "second" }, ctx);
+
+    let secondSettled = false;
+    void second.finally(() => { secondSettled = true; });
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    expect(secondSettled).toBe(false);
+    release();
+
+    const [[firstEvent], [secondEvent]] = await Promise.all([first, second]);
+    expect([firstEvent?.seq, secondEvent?.seq]).toEqual([4, 5]);
+    expect([firstEvent?.span_id, secondEvent?.data.thread_id]).toEqual(["first", "second"]);
+    expect(ctx.next_seq).toBe(6);
+  });
+
+  it("does not let one concurrent normalization failure poison a later call", async () => {
+    const sink: ArtifactSink = { put: async () => { throw new Error("sink failed"); } };
+    const ctx = context({ artifact_sink: sink, max_inline_output_bytes: 4 });
+    const first = normalizeCodexEvent({
+      type: "item.completed",
+      item: { id: "first", type: "command_execution", command: "first", aggregated_output: "too large", exit_code: 0 }
+    }, ctx);
+    const second = normalizeCodexEvent({ type: "thread.started", thread_id: "second" }, ctx);
+    await expect(first).rejects.toThrow("sink failed");
+    await expect(second).resolves.toMatchObject([{ seq: 4, kind: "run.started" }]);
+    expect(ctx.next_seq).toBe(5);
+  });
 });
