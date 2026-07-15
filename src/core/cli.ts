@@ -229,12 +229,7 @@ export async function createDefaultServerDependencies(
       return value;
     },
     loadSnapshot: requireSnapshot,
-    loadArtifactSummary: async (ref: ArtifactRef) => ({
-      ref,
-      mime: "application/octet-stream",
-      bytes: (await artifactStore.read(ref)).byteLength,
-      redacted: true
-    }),
+    loadArtifactSummary: async (ref: ArtifactRef) => artifactStore.stat(ref),
     modelCwd: directories.runner,
     timeoutMs: 120_000
   });
@@ -324,7 +319,8 @@ export async function createDefaultServerDependencies(
       return value;
     },
     loadDiagnosis: async (runId) => diagnoses.get(runId),
-    loadRepair: repairRegistry.loadRepair
+    loadRepair: repairRegistry.loadRepair,
+    loadArtifactRecord: async (ref) => artifactStore.stat(ref)
   };
 }
 

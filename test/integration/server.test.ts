@@ -31,6 +31,7 @@ import {
   computeSnapshotSourceHash
 } from "../../src/core/snapshot-identity.js";
 import type {
+  ArtifactRef,
   Diagnosis,
   RunEnvelope,
   SkillContract,
@@ -242,7 +243,18 @@ function dependencies(overrides: Partial<ServerDependencies> = {}): ServerDepend
     },
     async loadVerdict() { return verdict(); },
     async loadDiagnosis() { return diagnosis(); },
-    async loadRepair() { return repairRecord(); }
+    async loadRepair() { return repairRecord(); },
+    async loadArtifactRecord(ref: ArtifactRef) {
+      const digest = ref.slice("sha256:".length);
+      const diff = ref === `sha256:${"d".repeat(64)}`;
+      return {
+        ref,
+        sha256: digest,
+        bytes: 18,
+        mime: diff ? "text/x-diff" : "application/octet-stream",
+        redacted: diff
+      };
+    }
   };
   return { ...base, ...overrides };
 }
@@ -746,6 +758,114 @@ describe("Loopback API", () => {
     expect(response.body).not.toContain("/Users/alice");
     expect(response.body).not.toContain("file://");
     expect(response.body).not.toContain("test-token");
+    await app.close();
+  });
+
+  it("exports bounded metadata summaries only for artifacts referenced by report records", async () => {
+    const root = await temporaryRoot();
+    const contractRef = `sha256:${"1".repeat(64)}` as const;
+    const processRef = `sha256:${"2".repeat(64)}` as const;
+    const verifierRef = `sha256:${"3".repeat(64)}` as const;
+    const patchRef = `sha256:${"4".repeat(64)}` as const;
+    const rogueRef = `sha256:${"5".repeat(64)}` as const;
+    const records = new Map<ArtifactRef, {
+      ref: ArtifactRef;
+      sha256: string;
+      bytes: number;
+      mime: string;
+      redacted: boolean;
+    }>([
+      [contractRef, { ref: contractRef, sha256: "1".repeat(64), bytes: 41, mime: "application/json", redacted: false }],
+      [processRef, { ref: processRef, sha256: "2".repeat(64), bytes: 23, mime: "text/plain; charset=utf-8", redacted: false }],
+      [verifierRef, { ref: verifierRef, sha256: "3".repeat(64), bytes: 17, mime: "application/json", redacted: true }],
+      [patchRef, { ref: patchRef, sha256: "4".repeat(64), bytes: 18, mime: "text/x-diff", redacted: true }],
+      [rogueRef, { ref: rogueRef, sha256: "5".repeat(64), bytes: 999, mime: "text/x-diff", redacted: true }]
+    ]);
+    const loadArtifactRecord = vi.fn(async (ref: ArtifactRef) => {
+      const record = records.get(ref);
+      if (record === undefined) throw new Error("artifact missing");
+      return record;
+    });
+    const app = await createServer(dependencies({
+      async loadSnapshot() { return { ...snapshot(), contract_ref: contractRef }; },
+      async loadVerdict() {
+        return {
+          ...verdict(),
+          verifier_results: [{
+            id: "protected-tree",
+            passed: false,
+            hard_gate: true,
+            message: "Protected tree changed",
+            evidence: [verifierRef]
+          }]
+        };
+      },
+      async loadRepair() { return repairRecord({ patch_ref: patchRef }); },
+      runStore: {
+        async readEvents() {
+          return [
+            { ...event(0, "process.exited"), artifacts: [processRef] },
+            event(1, "run.finished")
+          ];
+        }
+      },
+      loadArtifactRecord
+    }), { sessionToken: "test-token", appData: root, webDist: undefined });
+
+    const response = await app.inject({
+      method: "GET", url: "/api/runs/run_01/report",
+      headers: { "x-arena-token": "test-token" }
+    });
+
+    expect(response.statusCode).toBe(200);
+    expect(response.json()).toMatchObject({
+      artifacts: [
+        {
+          ref: contractRef,
+          kind: "other",
+          label: "Artifact metadata",
+          summary: "41 bytes · application/json",
+          mime: "application/json",
+          bytes: 41,
+          redacted: false
+        },
+        {
+          ref: processRef,
+          kind: "process",
+          label: "Process artifact",
+          summary: "23 bytes · text/plain; charset=utf-8",
+          mime: "text/plain; charset=utf-8",
+          bytes: 23,
+          redacted: false
+        },
+        {
+          ref: verifierRef,
+          kind: "verifier",
+          label: "Verifier artifact",
+          summary: "17 bytes · application/json · redacted",
+          mime: "application/json",
+          bytes: 17,
+          redacted: true
+        },
+        {
+          ref: patchRef,
+          kind: "diff",
+          label: "Diff artifact",
+          summary: "18 bytes · text/x-diff · redacted",
+          mime: "text/x-diff",
+          bytes: 18,
+          redacted: true
+        }
+      ]
+    });
+    expect(response.body).not.toContain("private diff bytes");
+    expect(loadArtifactRecord.mock.calls.map(([ref]) => ref).sort()).toEqual([
+      contractRef,
+      patchRef,
+      processRef,
+      verifierRef
+    ].sort());
+    expect(loadArtifactRecord).not.toHaveBeenCalledWith(rogueRef);
     await app.close();
   });
 

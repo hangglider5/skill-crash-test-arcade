@@ -124,6 +124,29 @@ export const SanitizedTraceSchema = z.object({
   artifacts: z.array(ArtifactRefSchema)
 }).strict();
 
+const DIFF_MIMES = new Set(["text/x-diff", "text/x-patch"]);
+const BrowserArtifactRefSchema = ArtifactRefSchema.transform(
+  (ref) => ref as `sha256:${string}`
+);
+
+export const ArtifactSummarySchema = z.object({
+  ref: BrowserArtifactRefSchema,
+  kind: z.enum(["diff", "process", "test", "verifier", "other"]),
+  label: z.string().min(1).max(80),
+  summary: z.string().min(1).max(320),
+  mime: z.string().min(1).max(256),
+  bytes: z.number().int().nonnegative(),
+  redacted: z.boolean()
+}).strict().superRefine((artifact, context) => {
+  if (artifact.kind === "diff" && !DIFF_MIMES.has(artifact.mime.toLowerCase())) {
+    context.addIssue({
+      code: "custom",
+      path: ["kind"],
+      message: "Diff artifacts require an actual diff MIME type"
+    });
+  }
+});
+
 const PortableRepairPathSchema = z.string().min(1).refine((value) => {
   if (value.startsWith("/") || value.includes("\\")) return false;
   return value.split("/").every((part) => part.length > 0 && part !== "." && part !== "..");
@@ -162,8 +185,56 @@ export const ArenaReportSchema = z.object({
   verdict: SanitizedVerdictSchema,
   diagnosis: DiagnosisSchema.optional(),
   repair: SanitizedRepairSchema.optional(),
-  trace: z.array(SanitizedTraceSchema)
-}).strict();
+  trace: z.array(SanitizedTraceSchema),
+  artifacts: z.array(ArtifactSummarySchema).max(128)
+}).strict().superRefine((report, context) => {
+  const members = new Set<string>();
+  const add = (candidate: unknown): void => {
+    const parsed = ArtifactRefSchema.safeParse(candidate);
+    if (parsed.success) members.add(parsed.data);
+  };
+  add(report.snapshot.contract_ref);
+  for (const ref of report.verdict.evidence) add(ref);
+  for (const dimension of report.verdict.dimensions) {
+    for (const ref of dimension.evidence) add(ref);
+  }
+  for (const verifier of report.verdict.verifier_results) {
+    for (const ref of verifier.evidence) add(ref);
+  }
+  for (const ref of report.diagnosis?.evidence_refs ?? []) add(ref);
+  add(report.repair?.patch_ref);
+  for (const event of report.trace) {
+    for (const ref of event.artifacts) add(ref);
+  }
+
+  const summaries = new Set<string>();
+  for (const [index, artifact] of report.artifacts.entries()) {
+    if (summaries.has(artifact.ref)) {
+      context.addIssue({
+        code: "custom",
+        path: ["artifacts", index, "ref"],
+        message: "Artifact summary references must be unique"
+      });
+    }
+    summaries.add(artifact.ref);
+    if (!members.has(artifact.ref)) {
+      context.addIssue({
+        code: "custom",
+        path: ["artifacts", index, "ref"],
+        message: "Artifact summary is not a member of this report"
+      });
+    }
+  }
+  for (const ref of members) {
+    if (!summaries.has(ref)) {
+      context.addIssue({
+        code: "custom",
+        path: ["artifacts"],
+        message: `Artifact metadata is unavailable for ${ref}`
+      });
+    }
+  }
+});
 
 const SafeErrorSchema = z.object({
   error: z.object({ code: z.string(), message: z.string() }).strict()
@@ -182,6 +253,7 @@ export type RepairProposal = z.infer<typeof RepairProposalSchema>;
 export type SanitizedSnapshot = z.infer<typeof SanitizedSnapshotSchema>;
 export type SanitizedVerdict = z.infer<typeof SanitizedVerdictSchema>;
 export type SanitizedTrace = z.infer<typeof SanitizedTraceSchema>;
+export type ArtifactSummary = z.infer<typeof ArtifactSummarySchema>;
 export type SanitizedRepair = z.infer<typeof SanitizedRepairSchema>;
 export type ArenaReport = z.infer<typeof ArenaReportSchema>;
 

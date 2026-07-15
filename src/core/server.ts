@@ -13,6 +13,10 @@ import fastify, {
 import { z } from "zod";
 
 import type { ReplayManifest } from "../arena/manifest.js";
+import {
+  ArtifactRecordSchema,
+  type ArtifactRecord
+} from "../arena/artifact-store.js";
 import type { EventBus } from "./events.js";
 import type { ImportRequest } from "./importer.js";
 import type {
@@ -29,6 +33,7 @@ import {
   TraceEventSchema,
   VerdictBundleSchema,
   canonicalJson,
+  type ArtifactRef,
   type Diagnosis,
   type RunEnvelope,
   type SkillContract,
@@ -72,6 +77,7 @@ export interface ServerDependencies {
   readonly loadVerdict: (runId: string) => Promise<VerdictBundle>;
   readonly loadDiagnosis: (runId: string) => Promise<Diagnosis | undefined>;
   readonly loadRepair: (runId: string) => Promise<unknown | undefined>;
+  readonly loadArtifactRecord: (ref: ArtifactRef) => Promise<unknown>;
 }
 
 export interface ServerOptions {
@@ -332,6 +338,96 @@ const RepairReportSchema = z.discriminatedUnion("status", [
 
 function reportRepair(value: unknown): z.infer<typeof RepairReportSchema> {
   return RepairReportSchema.parse(value);
+}
+
+type ReportArtifactKind = "diff" | "process" | "test" | "verifier" | "other";
+
+const MAX_REPORT_ARTIFACTS = 128;
+const DIFF_MIMES = new Set(["text/x-diff", "text/x-patch"]);
+const ARTIFACT_LABELS: Record<ReportArtifactKind, string> = {
+  diff: "Diff artifact",
+  process: "Process artifact",
+  test: "Test artifact",
+  verifier: "Verifier artifact",
+  other: "Artifact metadata"
+};
+
+function reportArtifactRefs(input: {
+  readonly snapshot: SkillSnapshot;
+  readonly verdict: VerdictBundle;
+  readonly diagnosis?: Diagnosis;
+  readonly repair?: z.infer<typeof RepairReportSchema>;
+  readonly trace: readonly TraceEvent[];
+}): Map<ArtifactRef, Set<ReportArtifactKind>> {
+  const refs = new Map<ArtifactRef, Set<ReportArtifactKind>>();
+  const add = (candidate: unknown, kind: ReportArtifactKind): void => {
+    const parsed = ArtifactRefSchema.safeParse(candidate);
+    if (!parsed.success) return;
+    const kinds = refs.get(parsed.data) ?? new Set<ReportArtifactKind>();
+    kinds.add(kind);
+    refs.set(parsed.data, kinds);
+  };
+
+  add(input.snapshot.contract_ref, "other");
+  for (const ref of input.verdict.evidence) add(ref, "other");
+  for (const dimension of input.verdict.dimensions) {
+    for (const ref of dimension.evidence) add(ref, "other");
+  }
+  for (const verifier of input.verdict.verifier_results) {
+    for (const ref of verifier.evidence) add(ref, "verifier");
+  }
+  for (const ref of input.diagnosis?.evidence_refs ?? []) add(ref, "other");
+  add(input.repair?.patch_ref, "other");
+  for (const event of input.trace) {
+    const kind: ReportArtifactKind = event.kind === "process.started"
+      || event.kind === "process.exited"
+      ? "process"
+      : event.kind === "test.completed"
+        ? "test"
+        : event.kind === "verifier.completed"
+          ? "verifier"
+          : "other";
+    for (const ref of event.artifacts) add(ref, kind);
+  }
+  if (refs.size > MAX_REPORT_ARTIFACTS) {
+    throw new Error("Report artifact metadata exceeds the bounded summary limit");
+  }
+  return refs;
+}
+
+function reportArtifactKind(
+  record: ArtifactRecord,
+  memberships: ReadonlySet<ReportArtifactKind>
+): ReportArtifactKind {
+  if (DIFF_MIMES.has(record.mime.toLowerCase())) return "diff";
+  for (const kind of ["verifier", "test", "process"] as const) {
+    if (memberships.has(kind)) return kind;
+  }
+  return "other";
+}
+
+async function reportArtifactSummaries(
+  dependencies: ServerDependencies,
+  refs: ReadonlyMap<ArtifactRef, ReadonlySet<ReportArtifactKind>>
+): Promise<Array<Record<string, unknown>>> {
+  return Promise.all([...refs.entries()].sort(([left], [right]) => left.localeCompare(right))
+    .map(async ([ref, memberships]) => {
+      const record = ArtifactRecordSchema.parse(await dependencies.loadArtifactRecord(ref));
+      if (record.ref !== ref || `sha256:${record.sha256}` !== ref) {
+        throw new Error(`Report artifact metadata mismatch for ${ref}`);
+      }
+      const kind = reportArtifactKind(record, memberships);
+      const summary = `${record.bytes} bytes · ${record.mime}${record.redacted ? " · redacted" : ""}`;
+      return {
+        ref,
+        kind,
+        label: ARTIFACT_LABELS[kind],
+        summary: summary.slice(0, 320),
+        mime: record.mime,
+        bytes: record.bytes,
+        redacted: record.redacted
+      };
+    }));
 }
 
 function lastEventId(request: FastifyRequest): number {
@@ -596,6 +692,13 @@ export async function createServer(
         throw new Error("Report Trace membership mismatch");
       }
     }
+    const artifacts = await reportArtifactSummaries(dependencies, reportArtifactRefs({
+      snapshot: parsedSnapshot,
+      verdict: parsedVerdict,
+      ...(parsedDiagnosis === undefined ? {} : { diagnosis: parsedDiagnosis }),
+      ...(parsedRepair === undefined ? {} : { repair: parsedRepair }),
+      trace: parsedTrace
+    }));
     const reportSecrets = [
       options.sessionToken,
       parsedSnapshot.imported_path,
@@ -609,7 +712,8 @@ export async function createServer(
       verdict: reportVerdict(parsedVerdict),
       ...(parsedDiagnosis === undefined ? {} : { diagnosis: parsedDiagnosis }),
       ...(parsedRepair === undefined ? {} : { repair: parsedRepair }),
-      trace: parsedTrace.map(reportTrace)
+      trace: parsedTrace.map(reportTrace),
+      artifacts
     }, reportSecrets);
     const serialized = canonicalJson(report);
     if (reportSecrets.some((secret) => secret.length > 0 && serialized.includes(secret))) {

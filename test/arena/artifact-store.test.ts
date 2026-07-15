@@ -60,6 +60,28 @@ describe("ArtifactStore", () => {
       .toEqual(first);
   });
 
+  it("reads the verified metadata record without exposing artifact bytes", async () => {
+    const root = await createTemporaryRoot("scta-artifacts-");
+    const store = new ArtifactStore(root);
+    const stored = await store.put(Buffer.from("private diff bytes"), {
+      mime: "text/x-diff",
+      redacted: true
+    });
+
+    await expect(store.stat(stored.ref)).resolves.toEqual(stored);
+  });
+
+  it("rejects unbounded metadata before publishing artifact bytes", async () => {
+    const root = await createTemporaryRoot("scta-artifacts-");
+    const store = new ArtifactStore(root);
+
+    await expect(store.put(Buffer.from("evidence"), {
+      mime: "x".repeat(257),
+      redacted: false
+    })).rejects.toThrow();
+    expect(await readdir(root)).toEqual([]);
+  });
+
   it("deduplicates concurrent writes without leaving temporary files", async () => {
     const root = await createTemporaryRoot("scta-artifacts-");
     const store = new ArtifactStore(root);

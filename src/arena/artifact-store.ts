@@ -9,9 +9,11 @@ import {
   writeFile
 } from "node:fs/promises";
 import path from "node:path";
+import { z } from "zod";
 
 import {
   ArtifactRefSchema,
+  HashSchema,
   canonicalJson,
   sha256,
   type ArtifactRef
@@ -27,6 +29,14 @@ export interface ArtifactRecord extends ArtifactMetadata {
   sha256: string;
   bytes: number;
 }
+
+export const ArtifactRecordSchema: z.ZodType<ArtifactRecord> = z.object({
+  ref: ArtifactRefSchema,
+  sha256: HashSchema,
+  bytes: z.number().int().nonnegative(),
+  mime: z.string().min(1).max(256),
+  redacted: z.boolean()
+}).strict();
 
 async function readRegularFile(filePath: string): Promise<Buffer> {
   const stats = await lstat(filePath);
@@ -87,19 +97,19 @@ export class ArtifactStore {
     const bytes = Buffer.from(data);
     const digest = sha256(bytes);
     const ref = ArtifactRefSchema.parse(`sha256:${digest}`);
+    const record = ArtifactRecordSchema.parse({
+      ref,
+      sha256: digest,
+      bytes: bytes.byteLength,
+      mime: metadata.mime,
+      redacted: metadata.redacted
+    });
 
     return this.#withWriteLock(digest, async () => {
       const root = await this.#rootDirectory();
 
       const artifactPath = directChild(root, digest);
       const metadataPath = directChild(root, `${digest}.json`);
-      const record: ArtifactRecord = {
-        ref,
-        sha256: digest,
-        bytes: bytes.byteLength,
-        mime: metadata.mime,
-        redacted: metadata.redacted
-      };
 
       await publishExclusively(artifactPath, bytes);
       await this.#readVerifiedArtifact(artifactPath, digest);
@@ -125,6 +135,27 @@ export class ArtifactStore {
     const digest = parsed.data.slice("sha256:".length);
     const root = await this.#rootDirectory();
     return this.#readVerifiedArtifact(directChild(root, digest), digest);
+  }
+
+  async stat(ref: ArtifactRef): Promise<ArtifactRecord> {
+    const parsed = ArtifactRefSchema.safeParse(ref);
+    if (!parsed.success) {
+      throw new Error(`Invalid artifact reference: ${String(ref)}`);
+    }
+
+    const digest = parsed.data.slice("sha256:".length);
+    const root = await this.#rootDirectory();
+    const record = ArtifactRecordSchema.parse(JSON.parse(
+      (await readRegularFile(directChild(root, `${digest}.json`))).toString("utf8")
+    ));
+    if (record.ref !== parsed.data || record.sha256 !== digest) {
+      throw new Error(`Artifact metadata mismatch for ${parsed.data}`);
+    }
+    const bytes = await this.#readVerifiedArtifact(directChild(root, digest), digest);
+    if (record.bytes !== bytes.byteLength) {
+      throw new Error(`Artifact metadata byte count mismatch for ${parsed.data}`);
+    }
+    return record;
   }
 
   async #rootDirectory(): Promise<string> {
