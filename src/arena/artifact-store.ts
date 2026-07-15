@@ -1,8 +1,10 @@
 import { randomUUID } from "node:crypto";
+import { constants } from "node:fs";
 import {
   link,
   lstat,
   mkdir,
+  open,
   readFile,
   realpath,
   rm,
@@ -50,6 +52,30 @@ async function readRegularFile(filePath: string): Promise<Buffer> {
   return readFile(filePath);
 }
 
+async function readSidecarFromSingleDescriptor(filePath: string): Promise<Buffer> {
+  const handle = await open(
+    filePath,
+    constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0)
+  );
+  try {
+    const before = await handle.stat({ bigint: true });
+    if (!before.isFile()) throw new Error(`Artifact metadata must be a regular file: ${filePath}`);
+    const bytes = await handle.readFile();
+    const after = await handle.stat({ bigint: true });
+    if (before.dev !== after.dev
+      || before.ino !== after.ino
+      || before.size !== after.size
+      || before.mtimeNs !== after.mtimeNs
+      || before.ctimeNs !== after.ctimeNs
+      || BigInt(bytes.byteLength) !== before.size) {
+      throw new Error(`Artifact metadata identity changed while reading: ${filePath}`);
+    }
+    return bytes;
+  } finally {
+    await handle.close();
+  }
+}
+
 function directChild(root: string, name: string): string {
   const child = path.resolve(root, name);
   if (path.dirname(child) !== root || path.basename(child) !== name) {
@@ -85,6 +111,7 @@ export class ArtifactStore {
   readonly #configuredRoot: string;
   #canonicalRoot: Promise<string> | undefined;
   readonly #writeLocks = new Map<string, Promise<void>>();
+  readonly #authorizedRecords = new Map<string, ArtifactRecord>();
 
   constructor(root: string) {
     this.#configuredRoot = path.resolve(root);
@@ -116,12 +143,13 @@ export class ArtifactStore {
 
       await publishExclusively(metadataPath, `${canonicalJson(record)}\n`);
       const existing = JSON.parse(
-        (await readRegularFile(metadataPath)).toString("utf8")
+        (await readSidecarFromSingleDescriptor(metadataPath)).toString("utf8")
       ) as unknown;
       if (canonicalJson(existing) !== canonicalJson(record)) {
         throw new Error(`Artifact metadata mismatch for ${ref}`);
       }
 
+      this.#authorizedRecords.set(digest, Object.freeze({ ...record }));
       return record;
     });
   }
@@ -144,11 +172,18 @@ export class ArtifactStore {
     }
 
     const digest = parsed.data.slice("sha256:".length);
+    const authorized = this.#authorizedRecords.get(digest);
+    if (authorized === undefined) {
+      throw new Error(`Artifact metadata is not authorized by this store instance: ${parsed.data}`);
+    }
     const root = await this.#rootDirectory();
     const record = ArtifactRecordSchema.parse(JSON.parse(
-      (await readRegularFile(directChild(root, `${digest}.json`))).toString("utf8")
+      (await readSidecarFromSingleDescriptor(directChild(root, `${digest}.json`)))
+        .toString("utf8")
     ));
-    if (record.ref !== parsed.data || record.sha256 !== digest) {
+    if (record.ref !== parsed.data
+      || record.sha256 !== digest
+      || canonicalJson(record) !== canonicalJson(authorized)) {
       throw new Error(`Artifact metadata mismatch for ${parsed.data}`);
     }
     const bytes = await this.#readVerifiedArtifact(directChild(root, digest), digest);

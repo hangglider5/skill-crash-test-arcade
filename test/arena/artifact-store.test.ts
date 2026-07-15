@@ -71,6 +71,52 @@ describe("ArtifactStore", () => {
     await expect(store.stat(stored.ref)).resolves.toEqual(stored);
   });
 
+  it("rejects sidecar MIME and redaction tampering despite intact identity fields", async () => {
+    const root = await createTemporaryRoot("scta-artifacts-");
+    const store = new ArtifactStore(root);
+    const stored = await store.put(Buffer.from("private diff bytes"), {
+      mime: "text/x-diff",
+      redacted: true
+    });
+    await writeFile(path.join(root, `${stored.sha256}.json`), JSON.stringify({
+      ...stored,
+      mime: "text/plain",
+      redacted: false
+    }));
+
+    await expect(store.stat(stored.ref)).rejects.toThrow(/metadata.*mismatch/i);
+  });
+
+  it("rejects a sidecar replaced by a symbolic link", async () => {
+    const root = await createTemporaryRoot("scta-artifacts-");
+    const outside = await createTemporaryRoot("scta-artifacts-outside-");
+    const store = new ArtifactStore(root);
+    const stored = await store.put(Buffer.from("private diff bytes"), {
+      mime: "text/x-diff",
+      redacted: true
+    });
+    const sidecar = path.join(root, `${stored.sha256}.json`);
+    const outsideSidecar = path.join(outside, "metadata.json");
+    await writeFile(outsideSidecar, JSON.stringify(stored));
+    await rm(sidecar);
+    await symlink(outsideSidecar, sidecar);
+
+    await expect(store.stat(stored.ref)).rejects.toThrow();
+  });
+
+  it("does not let a fresh store instance claim authority from an old sidecar", async () => {
+    const root = await createTemporaryRoot("scta-artifacts-");
+    const writer = new ArtifactStore(root);
+    const stored = await writer.put(Buffer.from("private diff bytes"), {
+      mime: "text/x-diff",
+      redacted: true
+    });
+
+    await expect(new ArtifactStore(root).stat(stored.ref))
+      .rejects.toThrow(/not authorized/i);
+    await expect(writer.stat(stored.ref)).resolves.toEqual(stored);
+  });
+
   it("rejects unbounded metadata before publishing artifact bytes", async () => {
     const root = await createTemporaryRoot("scta-artifacts-");
     const store = new ArtifactStore(root);
