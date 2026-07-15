@@ -44,6 +44,10 @@ import {
 } from "../protocol/index.js";
 import type { PreflightResult } from "../codex/types.js";
 import { validateSnapshotIdentity } from "./snapshot-identity.js";
+import {
+  SampleReplaySchema,
+  type SampleReplay
+} from "./scripted-runner.js";
 
 const MAX_JSON_BYTES = 5 * 1024 * 1024;
 const MAX_ARCHIVE_BYTES = 16 * 1024 * 1024;
@@ -51,6 +55,7 @@ const MAX_CANDIDATE_PATCH_BYTES = 5 * 1024 * 1024;
 const TERMINAL_EVENTS = new Set<TraceEvent["kind"]>(["run.finished", "run.errored"]);
 
 export interface ServerDependencies {
+  readonly loadSampleReplay: (id: "dirty-tree") => Promise<SampleReplay>;
   readonly preflight: () => Promise<PreflightResult>;
   readonly importSkill: (request: ImportRequest, importsRoot: string) => Promise<SkillSnapshot>;
   readonly loadSnapshot: (hash: string) => Promise<SkillSnapshot>;
@@ -534,6 +539,17 @@ export async function createServer(
   });
 
   app.get("/api/health", async () => dependencies.preflight());
+
+  app.get("/api/samples/dirty-tree", async () => {
+    const sample = SampleReplaySchema.parse(
+      await dependencies.loadSampleReplay("dirty-tree")
+    );
+    const sanitized = SampleReplaySchema.parse(sanitize(sample, []));
+    if (canonicalJson(sample) !== canonicalJson(sanitized)) {
+      throw new Error("Recorded Replay contains unsanitized data");
+    }
+    return sanitized;
+  });
 
   app.post("/api/imports", async (request, reply) => {
     const importsRoot = path.join(appData, "imports");

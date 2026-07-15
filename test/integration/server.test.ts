@@ -174,6 +174,15 @@ function dependencies(overrides: Partial<ServerDependencies> = {}): ServerDepend
   const bus = new EventBus();
   const created = envelope("created");
   const base: ServerDependencies = {
+    async loadSampleReplay() {
+      return {
+        schema: "arena.sample-replay/v1",
+        run: envelope(),
+        trace: [event(0), event(1, "run.finished")],
+        verdict: verdict(),
+        diagnosis: diagnosis()
+      };
+    },
     async preflight() {
       return {
         ok: true,

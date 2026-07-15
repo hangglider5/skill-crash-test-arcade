@@ -19,6 +19,7 @@ import { EventBus } from "./events.js";
 import { importSkill } from "./importer.js";
 import { RunOrchestrator } from "./orchestrator.js";
 import { RepairCoordinator } from "./repair.js";
+import { readSampleReplay } from "./scripted-runner.js";
 import {
   createServer,
   ensurePrivateDirectory,
@@ -329,6 +330,15 @@ export async function createDefaultServerDependencies(
   const repairRegistry = createProcessRepairRegistry(repairCoordinator);
 
   return {
+    loadSampleReplay: async (id) => {
+      if (id !== "dirty-tree") throw new Error(`Unknown Recorded Replay: ${id}`);
+      return readSampleReplay(path.join(
+        INSTALLATION_ROOT,
+        "samples",
+        "replays",
+        "dirty-tree"
+      ));
+    },
     preflight: async () => runPreflight({ appDataDir: appData }),
     importSkill: async (request, root) => {
       const value = await importSkill(request, root);

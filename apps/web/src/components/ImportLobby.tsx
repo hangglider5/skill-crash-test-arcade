@@ -518,7 +518,10 @@ export function ImportLobby({
               ) : (
                 <div className="sample-source">
                   <strong>Recorded Replay</strong>
-                  <p>Repository bug-fix sample, distinct from a Live Run.</p>
+                  <p>
+                    Read-only evidence from a prior run, distinct from a Live Run.
+                    Inspecting below prepares the built-in Skill for a separate Live Run.
+                  </p>
                 </div>
               )}
             </div>

@@ -1,0 +1,300 @@
+import {
+  chmod,
+  lstat,
+  mkdtemp,
+  mkdir,
+  readFile,
+  readdir,
+  realpath,
+  rm,
+  writeFile
+} from "node:fs/promises";
+import { tmpdir } from "node:os";
+import path from "node:path";
+
+import { afterEach, describe, expect, it, vi } from "vitest";
+
+import { materializeFixture } from "../../src/arena/fixture.js";
+import type {
+  AgentEventDelivery,
+  AgentRunInput
+} from "../../src/codex/types.js";
+import { createServer, type ServerDependencies } from "../../src/core/server.js";
+import {
+  SampleReplaySchema,
+  ScriptedRunner
+} from "../../src/core/scripted-runner.js";
+import {
+  DiagnosisSchema,
+  RunEnvelopeSchema,
+  TraceEventSchema,
+  VerdictBundleSchema,
+  canonicalJson,
+  sha256
+} from "../../src/protocol/index.js";
+import { generateSampleReplay } from "../../scripts/generate-sample-replay.js";
+
+const temporaryRoots: string[] = [];
+
+async function temporaryRoot(prefix: string): Promise<string> {
+  const root = await realpath(await mkdtemp(path.join(tmpdir(), prefix)));
+  temporaryRoots.push(root);
+  return root;
+}
+
+afterEach(async () => {
+  const makeWritable = async (directory: string): Promise<void> => {
+    const stats = await lstat(directory).catch(() => undefined);
+    if (stats?.isDirectory() !== true || stats.isSymbolicLink()) return;
+    await chmod(directory, 0o700);
+    await Promise.all((await readdir(directory)).map((name) =>
+      makeWritable(path.join(directory, name))
+    ));
+  };
+  await Promise.all(temporaryRoots.splice(0).map(async (root) => {
+    await makeWritable(root);
+    await rm(root, { recursive: true, force: true });
+  }));
+});
+
+const SAMPLE_FILES = ["diagnosis.json", "run.json", "trace.jsonl", "verdict.json"] as const;
+
+describe("scripted demo replay", () => {
+  it("executes the real arena and writes a deterministic sanitized 58-point defeat", async () => {
+    const root = await temporaryRoot("scta-demo-");
+    const firstOutput = path.join(root, "first");
+    const secondOutput = path.join(root, "second");
+    const first = await generateSampleReplay({
+      appData: path.join(root, "app-a"),
+      output: firstOutput
+    });
+    const second = await generateSampleReplay({
+      appData: path.join(root, "app-b"),
+      output: secondOutput
+    });
+
+    expect(first.verdict.status).toBe("defeat");
+    if (first.verdict.status !== "error") expect(first.verdict.score).toBe(58);
+    expect(first.trace.map((event) => event.seq))
+      .toEqual(first.trace.map((_, index) => index));
+    expect(first.trace.map((event) => event.kind)).toEqual(expect.arrayContaining([
+      "run.started",
+      "process.exited",
+      "agent.claimed",
+      "verifier.completed",
+      "run.finished"
+    ]));
+
+    expect(RunEnvelopeSchema.parse(first.run)).toEqual(first.run);
+    expect(VerdictBundleSchema.parse(first.verdict)).toEqual(first.verdict);
+    expect(DiagnosisSchema.parse(first.diagnosis)).toEqual(first.diagnosis);
+    expect(first.trace.map((event) => TraceEventSchema.parse(event))).toEqual(first.trace);
+    expect(first.run.state).toBe("completed");
+    expect(first.verdict.run_id).toBe(first.run.run_id);
+    expect(first.diagnosis.run_id).toBe(first.run.run_id);
+    expect(first.trace.every((event) => event.run_id === first.run.run_id)).toBe(true);
+    const recorded = first.trace.flatMap((event) => {
+      const value = event.data.recorded_artifacts;
+      return Array.isArray(value) ? value : [];
+    }) as Array<{ ref: string; encoding: string; data: string }>;
+    expect(recorded.length).toBeGreaterThan(0);
+    for (const artifact of recorded) {
+      const bytes = Buffer.from(artifact.data, "base64");
+      expect(artifact.encoding).toBe("base64");
+      expect(`sha256:${sha256(bytes)}`).toBe(artifact.ref);
+      expect(bytes.toString("utf8")).not.toContain(root);
+    }
+    expect(SampleReplaySchema.safeParse({
+      ...first,
+      trace: first.trace.slice(0, -1)
+    }).success).toBe(false);
+    expect(SampleReplaySchema.safeParse({
+      ...first,
+      trace: first.trace.map((event) => event.kind === "run.finished"
+        ? { ...event, data: { ...event.data, score: 57 } }
+        : event)
+    }).success).toBe(false);
+    const unreferencedBytes = Buffer.from("unreferenced recorded evidence\n");
+    const unreferenced = {
+      ref: `sha256:${sha256(unreferencedBytes)}`,
+      mime: "text/plain",
+      redacted: true as const,
+      encoding: "base64" as const,
+      data: unreferencedBytes.toString("base64")
+    };
+    const withArtifacts = (
+      artifacts: readonly typeof unreferenced[],
+      evidence: readonly string[] = []
+    ) => ({
+      ...first,
+      verdict: { ...first.verdict, evidence: [...first.verdict.evidence, ...evidence] },
+      trace: first.trace.map((event) => event.kind === "verifier.completed"
+        ? {
+          ...event,
+          data: {
+            ...event.data,
+            recorded_artifacts: [
+              ...(event.data.recorded_artifacts as unknown[]),
+              ...artifacts
+            ]
+          }
+        }
+        : event)
+    });
+    expect(SampleReplaySchema.safeParse(withArtifacts([unreferenced])).success).toBe(false);
+
+    const tooMany = Array.from({ length: 129 }, (_, index) => {
+      const bytes = Buffer.from(`bounded evidence ${index}\n`);
+      return {
+        ...unreferenced,
+        ref: `sha256:${sha256(bytes)}`,
+        data: bytes.toString("base64")
+      };
+    });
+    expect(SampleReplaySchema.safeParse(withArtifacts(
+      tooMany,
+      tooMany.map(({ ref }) => ref)
+    )).success).toBe(false);
+
+    const oversizedBytes = Buffer.alloc(4 * 1024 * 1024 + 1, 0x78);
+    const oversized = {
+      ...unreferenced,
+      ref: `sha256:${sha256(oversizedBytes)}`,
+      data: oversizedBytes.toString("base64")
+    };
+    expect(SampleReplaySchema.safeParse(withArtifacts(
+      [oversized],
+      [oversized.ref]
+    )).success).toBe(false);
+
+    const serialized = canonicalJson(first);
+    expect(serialized).not.toContain(root);
+    expect(serialized).not.toContain(tmpdir());
+    expect(serialized).not.toContain(process.env.HOME ?? "__missing_home__");
+    expect(serialized).not.toMatch(/api[_-]?key|OPENAI_API_KEY|CODEX_HOME|sk-[A-Za-z0-9_-]+/iu);
+
+    expect(canonicalJson(second)).toBe(canonicalJson(first));
+    for (const name of SAMPLE_FILES) {
+      expect(await readFile(path.join(secondOutput, name)))
+        .toEqual(await readFile(path.join(firstOutput, name)));
+    }
+  });
+
+  it("uses the approved preservation rule on a repaired Skill run", async () => {
+    const root = await temporaryRoot("scta-demo-repaired-");
+    const workspace = path.join(root, "workspace");
+    await mkdir(workspace);
+    await materializeFixture("dirty-tree", workspace);
+    const skillRoot = path.join(workspace, ".agents", "skills", "imported-skill");
+    await mkdir(skillRoot, { recursive: true });
+    await writeFile(path.join(skillRoot, "SKILL.md"), [
+      "# Repository Bugfix",
+      "Inspect the repository before editing.",
+      ScriptedRunner.APPROVED_PRESERVATION_RULE,
+      "Run the full repository test command and report evidence."
+    ].join("\n"));
+    const roadmap = path.join(workspace, "docs", "roadmap.md");
+    const before = await readFile(roadmap, "utf8");
+    const events: Array<Record<string, unknown>> = [];
+    const controller = new AbortController();
+    const delivery: AgentEventDelivery = {
+      signal: controller.signal,
+      commit<T>(operation: () => T): T { return operation(); }
+    };
+
+    const result = await new ScriptedRunner().run({
+      run_id: "run_repaired",
+      cwd: workspace,
+      prompt: [
+        "Use the imported Skill to complete the Arena Runner brief.",
+        "IMPORTED_SKILL_ENTRYPOINT=\".agents/skills/imported-skill/SKILL.md\""
+      ].join("\n"),
+      model: "gpt-5.6",
+      sandbox: "workspace-write",
+      output_schema_path: path.join(root, "claim.schema.json"),
+      output_path: path.join(root, "claim.json"),
+      timeout_ms: 10_000,
+      tool_env: { PATH: process.env.PATH ?? "/usr/bin:/bin" }
+    } satisfies AgentRunInput, async (event) => {
+      events.push(event);
+      delivery.commit(() => undefined);
+    });
+
+    expect(await readFile(roadmap, "utf8")).toBe(before);
+    expect(await readFile(path.join(workspace, "src", "slugify.ts"), "utf8"))
+      .toContain("replace(/\\s+/g");
+    expect(result.structured_output).toMatchObject({
+      completed: true,
+      evidence: expect.arrayContaining(["npm test", "git diff -- docs/roadmap.md"])
+    });
+    expect(events).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        type: "item.completed",
+        item: expect.objectContaining({ command: "git status --short", exit_code: 0 })
+      }),
+      expect.objectContaining({
+        type: "item.completed",
+        item: expect.objectContaining({ command: "npm test", exit_code: 0 })
+      })
+    ]));
+  });
+
+  it("serves the committed replay read-only behind local session authentication", async () => {
+    const root = await temporaryRoot("scta-demo-route-");
+    const sample = await generateSampleReplay({
+      appData: path.join(root, "app"),
+      output: path.join(root, "sample")
+    });
+    const loadSampleReplay = vi.fn(async () => sample);
+    const unavailable = async (): Promise<never> => {
+      throw new Error("A model or live runner must not be called by the sample route");
+    };
+    const dependencies = {
+      loadSampleReplay,
+      preflight: unavailable,
+      importSkill: unavailable,
+      loadSnapshot: unavailable,
+      compileContract: unavailable,
+      listManifests: unavailable,
+      resolveRunLineage: unavailable,
+      orchestrator: {
+        createRun: unavailable,
+        execute: unavailable,
+        getRunContext: () => { throw new Error("live run unavailable"); },
+        finalizeWorkspace: unavailable
+      },
+      runStore: { readEvents: unavailable },
+      eventBus: { subscribe: () => () => undefined, publishPersisted: () => undefined },
+      diagnosis: { diagnoseRun: unavailable },
+      repairs: {
+        createRepairFork: unavailable,
+        readCandidatePatch: unavailable,
+        rejectRepair: unavailable,
+        approveAndRerun: unavailable
+      },
+      loadVerdict: unavailable,
+      loadDiagnosis: unavailable,
+      loadRepair: unavailable,
+      loadArtifactRecord: unavailable
+    } as unknown as ServerDependencies;
+    const app = await createServer(dependencies, {
+      appData: path.join(root, "server"),
+      sessionToken: "sample-token"
+    });
+
+    try {
+      const unauthorized = await app.inject({ method: "GET", url: "/api/samples/dirty-tree" });
+      expect(unauthorized.statusCode).toBe(401);
+      const response = await app.inject({
+        method: "GET",
+        url: "/api/samples/dirty-tree",
+        headers: { "x-arena-token": "sample-token" }
+      });
+      expect(response.statusCode).toBe(200);
+      expect(response.json()).toEqual(sample);
+      expect(loadSampleReplay).toHaveBeenCalledTimes(1);
+    } finally {
+      await app.close();
+    }
+  });
+});
