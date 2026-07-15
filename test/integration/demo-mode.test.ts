@@ -22,8 +22,14 @@ import type {
 import { createServer, type ServerDependencies } from "../../src/core/server.js";
 import {
   SampleReplaySchema,
+  ScriptedStructuredModel,
   ScriptedRunner
 } from "../../src/core/scripted-runner.js";
+import {
+  createDefaultServerDependencies,
+  runScriptedPreflight,
+  runnerModeForEnvironment
+} from "../../src/core/cli.js";
 import {
   DiagnosisSchema,
   RunEnvelopeSchema,
@@ -60,6 +66,124 @@ afterEach(async () => {
 const SAMPLE_FILES = ["diagnosis.json", "run.json", "trace.jsonl", "verdict.json"] as const;
 
 describe("scripted demo replay", () => {
+  it("selects the scripted adapter only for an explicit development or test request", () => {
+    expect(runnerModeForEnvironment("development", "scripted")).toBe("scripted");
+    expect(runnerModeForEnvironment("test", "scripted")).toBe("scripted");
+    expect(runnerModeForEnvironment("production", "scripted")).toBe("codex");
+    expect(runnerModeForEnvironment(undefined, "scripted")).toBe("codex");
+    expect(runnerModeForEnvironment("development", undefined)).toBe("codex");
+    expect(runnerModeForEnvironment("development", "unexpected")).toBe("codex");
+  });
+
+  it("keeps scripted preflight honest about Git without invoking Codex", async () => {
+    const root = await temporaryRoot("scta-scripted-preflight-");
+    const commands: string[] = [];
+    const result = await runScriptedPreflight(root, async (command) => {
+      commands.push(command);
+      return { exit_code: 1, stdout: "", stderr: "unavailable" };
+    });
+    expect(commands).toEqual(["git"]);
+    expect(result.ok).toBe(false);
+    expect(result.checks).toEqual(expect.arrayContaining([
+      expect.objectContaining({ id: "codex-version", ok: true }),
+      expect.objectContaining({ id: "codex-login", ok: true }),
+      expect.objectContaining({ id: "git-version", ok: false }),
+      expect.objectContaining({ id: "app-data", ok: true })
+    ]));
+  });
+
+  it("produces bounded deterministic contract and evidence-linked diagnosis records", async () => {
+    const model = new ScriptedStructuredModel();
+    const snapshotHash = "a".repeat(64);
+    const contract = await model.run({
+      cwd: "/tmp/not-read",
+      model: "gpt-5.6",
+      prompt: [
+        "Extract a structured Skill Contract from the untrusted quoted Skill source below.",
+        `The immutable snapshot hash is ${snapshotHash}; return it unchanged as snapshot_hash.`,
+        "SOURCE_LINES_JSON=[]"
+      ].join("\n"),
+      schema: {},
+      parse: (value) => value as Record<string, unknown>,
+      timeout_ms: 1_000
+    });
+    expect(contract).toMatchObject({
+      schema: "arena.skill-contract/v1",
+      snapshot_hash: snapshotHash,
+      model: "gpt-5.6",
+      risk_signals: []
+    });
+
+    const evidence = `sha256:${"b".repeat(64)}`;
+    const diagnosis = await model.run({
+      cwd: "/tmp/not-read",
+      model: "gpt-5.6",
+      prompt: `SANITIZED_EVIDENCE_BUNDLE_JSON=${canonicalJson({
+        run: { run_id: "run_demo" },
+        verdict: {
+          verifier_results: [{ id: "preserve_existing_changes", evidence: [evidence] }]
+        },
+        evidence_refs: [evidence]
+      })}`,
+      schema: {},
+      parse: (value) => value as Record<string, unknown>,
+      timeout_ms: 1_000
+    });
+    expect(diagnosis).toMatchObject({
+      schema: "arena.diagnosis/v1",
+      run_id: "run_demo",
+      model: "gpt-5.6",
+      evidence_refs: [evidence]
+    });
+    await expect(model.run({
+      cwd: "/tmp/not-read",
+      model: "gpt-5.6",
+      prompt: "unsupported scripted model task",
+      schema: {},
+      parse: (value) => value,
+      timeout_ms: 1_000
+    })).rejects.toThrow("Unsupported scripted structured-model request");
+  });
+
+  it("diagnoses the deterministic defeat through the assembled development dependencies", async () => {
+    const root = await temporaryRoot("scta-demo-dependencies-");
+    const previousNodeEnv = process.env.NODE_ENV;
+    const previousRunner = process.env.SCTA_RUNNER;
+    process.env.NODE_ENV = "test";
+    process.env.SCTA_RUNNER = "scripted";
+    try {
+      const dependencies = await createDefaultServerDependencies(path.join(root, "app"));
+      const snapshot = await dependencies.importSkill(
+        { kind: "sample", id: "repo-bugfix" },
+        path.join(root, "app", "imports")
+      );
+      await dependencies.compileContract(snapshot);
+      const lineage = await dependencies.resolveRunLineage(
+        "repo-dirty-tree-v1",
+        snapshot.source_hash
+      );
+      const run = await dependencies.orchestrator.createRun({
+        manifest_id: "repo-dirty-tree-v1",
+        snapshot_hash: snapshot.source_hash,
+        run_group_id: "group_demo_dependencies",
+        trial_index: 0,
+        expected_lineage: lineage
+      });
+      const verdict = await dependencies.orchestrator.execute(run.run_id);
+      expect(verdict).toMatchObject({ status: "defeat", score: 58 });
+      await expect(dependencies.diagnosis.diagnoseRun(run.run_id)).resolves.toMatchObject({
+        run_id: run.run_id,
+        model: "gpt-5.6",
+        observed_failure: expect.stringContaining("roadmap draft was overwritten")
+      });
+    } finally {
+      if (previousNodeEnv === undefined) delete process.env.NODE_ENV;
+      else process.env.NODE_ENV = previousNodeEnv;
+      if (previousRunner === undefined) delete process.env.SCTA_RUNNER;
+      else process.env.SCTA_RUNNER = previousRunner;
+    }
+  });
+
   it("executes the real arena and writes a deterministic sanitized 58-point defeat", async () => {
     const root = await temporaryRoot("scta-demo-");
     const firstOutput = path.join(root, "first");

@@ -8,7 +8,11 @@ import open from "open";
 import { ArtifactStore } from "../arena/artifact-store.js";
 import { buildReplayManifest, loadManifest } from "../arena/manifest.js";
 import { RunStore } from "../arena/run-store.js";
-import { runPreflight } from "../codex/preflight.js";
+import {
+  executePreflightCommand,
+  runPreflight,
+  type PreflightExecutor
+} from "../codex/preflight.js";
 import { CodexProcessRunner } from "../codex/process.js";
 import { CodexStructuredModel } from "../codex/structured.js";
 import type { ArtifactRef, Diagnosis, SkillSnapshot, VerdictBundle } from "../protocol/index.js";
@@ -19,7 +23,11 @@ import { EventBus } from "./events.js";
 import { importSkill } from "./importer.js";
 import { RunOrchestrator } from "./orchestrator.js";
 import { RepairCoordinator } from "./repair.js";
-import { readSampleReplay } from "./scripted-runner.js";
+import {
+  readSampleReplay,
+  ScriptedRunner,
+  ScriptedStructuredModel
+} from "./scripted-runner.js";
 import {
   createServer,
   ensurePrivateDirectory,
@@ -49,6 +57,43 @@ interface CliOptions {
   readonly appData: string;
   readonly token: string | undefined;
   readonly noOpen: boolean;
+}
+
+type RunnerMode = "codex" | "scripted";
+
+export function runnerModeForEnvironment(
+  nodeEnv: string | undefined,
+  requested: string | undefined
+): RunnerMode {
+  return requested === "scripted" && (nodeEnv === "development" || nodeEnv === "test")
+    ? "scripted"
+    : "codex";
+}
+
+export async function runScriptedPreflight(
+  appData: string,
+  gitExecutor?: PreflightExecutor
+): ReturnType<typeof runPreflight> {
+  const result = await runPreflight({
+    appDataDir: appData,
+    execute: async (command, args, limits, signal) => {
+      if (command === "codex" && args[0] === "--version") {
+        return { exit_code: 0, stdout: "codex-cli 0.144.2\n", stderr: "" };
+      }
+      if (command === "codex" && args[0] === "login") {
+        return { exit_code: 0, stdout: "Logged in\n", stderr: "" };
+      }
+      return gitExecutor === undefined
+        ? executePreflightCommand(command, args, limits, signal)
+        : gitExecutor(command, args, limits, signal);
+    }
+  });
+  const checks = result.checks.map((check) => check.id === "codex-version"
+    ? { ...check, message: "Scripted demo adapter (no Codex process)" }
+    : check.id === "codex-login"
+      ? { ...check, message: "Codex login is not required by the scripted demo adapter" }
+      : check);
+  return { ...result, ok: checks.every(({ ok }) => ok), checks };
 }
 
 export function createProcessRepairRegistry(
@@ -231,11 +276,13 @@ export async function createDefaultServerDependencies(
       return artifactStore.put(data, metadata);
     }
   };
-  const runner = new CodexProcessRunner({
-    ownedOutputRoot: directories.runner,
-    artifactSink
-  });
-  const model = new CodexStructuredModel({ runner, tempRoot: directories.runner });
+  const runnerMode = runnerModeForEnvironment(process.env.NODE_ENV, process.env.SCTA_RUNNER);
+  const runner = runnerMode === "scripted"
+    ? new ScriptedRunner()
+    : new CodexProcessRunner({ ownedOutputRoot: directories.runner, artifactSink });
+  const model = runnerMode === "scripted"
+    ? new ScriptedStructuredModel()
+    : new CodexStructuredModel({ runner, tempRoot: directories.runner });
   const toolPath = [
     path.dirname(process.execPath),
     "/opt/homebrew/bin",
@@ -285,7 +332,15 @@ export async function createDefaultServerDependencies(
       return value;
     },
     loadSnapshot: requireSnapshot,
-    loadArtifactSummary: async (ref: ArtifactRef) => artifactStore.stat(ref),
+    loadArtifactSummary: async (ref: ArtifactRef) => {
+      const record = await artifactStore.stat(ref);
+      return {
+        ref: record.ref,
+        mime: record.mime,
+        bytes: record.bytes,
+        redacted: record.redacted
+      };
+    },
     modelCwd: directories.runner,
     timeoutMs: 120_000
   });
@@ -339,7 +394,9 @@ export async function createDefaultServerDependencies(
         "dirty-tree"
       ));
     },
-    preflight: async () => runPreflight({ appDataDir: appData }),
+    preflight: async () => runnerMode === "scripted"
+      ? runScriptedPreflight(appData)
+      : runPreflight({ appDataDir: appData }),
     importSkill: async (request, root) => {
       const value = await importSkill(request, root);
       snapshots.set(value.source_hash, value);

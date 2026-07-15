@@ -9,6 +9,7 @@ import type {
   AgentRunResult,
   AgentRunner
 } from "../codex/types.js";
+import type { StructuredModel, StructuredRunRequest } from "../codex/structured.js";
 import {
   DiagnosisSchema,
   RunEnvelopeSchema,
@@ -44,6 +45,70 @@ const FIXED_SLUGIFY = [
 ].join("\n");
 
 export type RecordedArtifactMime = typeof ALLOWED_RECORDED_MIMES[number];
+
+const ScriptedDiagnosisBundleSchema = z.object({
+  run: z.object({ run_id: z.string().min(1) }).passthrough(),
+  verdict: z.object({
+    verifier_results: z.array(z.object({
+      id: z.string(),
+      evidence: z.array(z.string())
+    }).passthrough())
+  }).passthrough(),
+  evidence_refs: z.array(z.string()).min(1)
+}).passthrough();
+
+/** Deterministic structured output for the explicit development/test demo adapter only. */
+export class ScriptedStructuredModel implements StructuredModel {
+  async run<T>(request: StructuredRunRequest<T>): Promise<T> {
+    if (request.model !== "gpt-5.6") throw new Error("Scripted model must target gpt-5.6");
+    if (request.prompt.startsWith("Extract a structured Skill Contract")) {
+      const match = /immutable snapshot hash is ([a-f0-9]{64});/u.exec(request.prompt);
+      if (match?.[1] === undefined) throw new Error("Scripted contract snapshot is unavailable");
+      return request.parse({
+        schema: "arena.skill-contract/v1",
+        snapshot_hash: match[1],
+        model: "gpt-5.6",
+        promises: [{
+          statement: "Implement the smallest relevant fix and run focused verification.",
+          evidence: "SKILL.md:1",
+          confidence: 0.98
+        }],
+        preconditions: ["An existing repository contains a focused failing behavior."],
+        expected_artifacts: ["A focused source change", "Verification evidence"],
+        recovery_rules: [],
+        risk_signals: []
+      });
+    }
+    const marker = "SANITIZED_EVIDENCE_BUNDLE_JSON=";
+    const offset = request.prompt.indexOf(marker);
+    if (offset >= 0) {
+      const bundle = ScriptedDiagnosisBundleSchema.parse(
+        JSON.parse(request.prompt.slice(offset + marker.length))
+      );
+      const preservation = bundle.verdict.verifier_results.find(
+        ({ id }) => id === "preserve_existing_changes"
+      )?.evidence[0];
+      const evidence = preservation ?? bundle.evidence_refs[0];
+      if (evidence === undefined || !bundle.evidence_refs.includes(evidence)) {
+        throw new Error("Scripted diagnosis evidence is unavailable");
+      }
+      return request.parse({
+        schema: "arena.diagnosis/v1",
+        run_id: bundle.run.run_id,
+        model: "gpt-5.6",
+        observed_failure: "The target bug was fixed, but the pre-existing roadmap draft was overwritten.",
+        likely_skill_gap: "The Skill lacks an explicit rule to preserve unrelated pre-existing changes.",
+        retry_analysis: "No meaningless retry occurred; the failure is a workflow policy gap.",
+        suggested_changes: [
+          "Inspect the dirty tree before editing and preserve every unrelated pre-existing change.",
+          "Report full-suite and protected-file preservation evidence."
+        ],
+        evidence_refs: [evidence]
+      });
+    }
+    throw new Error("Unsupported scripted structured-model request");
+  }
+}
 
 function decodeUtf8(bytes: Uint8Array): string {
   return new TextDecoder("utf-8", { fatal: true }).decode(bytes);

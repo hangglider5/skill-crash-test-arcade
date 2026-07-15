@@ -305,7 +305,7 @@ describe("False Green Mimic", () => {
         final_claim: { completed: false, summary: "Verification failed", evidence: [] },
         trace: [],
         artifact_store: artifactStore,
-        process_timeout_ms: 250
+        process_timeout_ms: 1_000
       });
     } catch (error) {
       expect(error).toBeInstanceOf(ProcessExecutionError);

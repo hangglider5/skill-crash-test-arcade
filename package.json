@@ -7,13 +7,17 @@
     "node": ">=22.6.0"
   },
   "scripts": {
-    "dev": "concurrently -k -n core,web \"pnpm dev:core\" \"pnpm dev:web\"",
+    "dev": "NODE_ENV=development concurrently -k -n core,web \"pnpm dev:core\" \"pnpm dev:web\"",
     "dev:core": "tsx watch src/core/cli.ts --dev-token dev-token",
     "dev:web": "vite",
     "build": "tsup src/core/cli.ts --format esm --out-dir dist/core && vite build",
     "start": "node dist/core/cli.js",
     "test": "vitest run",
+    "test:e2e": "playwright test",
     "test:watch": "vitest",
+    "generate:samples": "tsx scripts/generate-sample-replay.ts",
+    "smoke:built": "tsx scripts/smoke-built-server.ts",
+    "smoke:live": "tsx scripts/smoke-live-codex.ts",
     "typecheck": "tsc --noEmit",
     "check": "pnpm typecheck && pnpm test && pnpm build"
   },
