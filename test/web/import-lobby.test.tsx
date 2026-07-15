@@ -263,6 +263,21 @@ describe("ImportLobby", () => {
     expect(api.importSkill).toHaveBeenLastCalledWith({ kind: "sample", id: "repo-bugfix" });
   });
 
+  it("remounts source controls without controlled-input warnings", async () => {
+    const user = userEvent.setup();
+    const consoleError = vi.spyOn(console, "error").mockImplementation(() => undefined);
+    let warningCalls: unknown[][] = [];
+    try {
+      render(<ImportLobby api={fakeApi()} onRunStarted={vi.fn()} />);
+      await user.click(screen.getByRole("tab", { name: "Local path" }));
+      await user.click(screen.getByRole("tab", { name: "ZIP" }));
+      warningCalls = consoleError.mock.calls;
+    } finally {
+      consoleError.mockRestore();
+    }
+    expect(warningCalls).toEqual([]);
+  });
+
   it("hides local provenance and prioritizes Dirty Tree while allowing selection", async () => {
     const user = userEvent.setup();
     const api = fakeApi({

@@ -1,5 +1,5 @@
 import { StrictMode } from "react";
-import { fireEvent, render, screen } from "@testing-library/react";
+import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { userEvent } from "@testing-library/user-event";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
@@ -7,6 +7,8 @@ import { App } from "../../apps/web/src/App.js";
 import {
   ApiError,
   ArenaApi,
+  ArenaReportSchema,
+  type ArenaEventSource,
   type PreflightResult,
   type ReplayManifest
 } from "../../apps/web/src/api.js";
@@ -41,6 +43,15 @@ function lobbyManifest(): ReplayManifest {
     fault_cards: [{ id: "dirty-tree", version: 1 }],
     budgets: { wall_time_s: 180, max_command_retries: 2 },
     scoring: { weights: { task_correctness: 1 }, hard_gates: ["preserve"] }
+  };
+}
+
+function falseGreenManifest(): ReplayManifest {
+  return {
+    ...lobbyManifest(),
+    id: "repo-false-green-v1",
+    name: "False Green Mimic",
+    fault_cards: [{ id: "false-green", version: 1 }]
   };
 }
 
@@ -254,6 +265,87 @@ describe("App", () => {
 
     expect(await screen.findByRole("heading", { name: "Run Monitor" })).toBeVisible();
     expect(screen.getByText("run_app_01")).toBeVisible();
+  });
+
+  it("hands the exact selected manifest into the live run screen", async () => {
+    vi.spyOn(ArenaApi.prototype, "health").mockResolvedValue(lobbyHealth());
+    vi.spyOn(ArenaApi.prototype, "listManifests")
+      .mockResolvedValue([lobbyManifest(), falseGreenManifest()]);
+    vi.spyOn(ArenaApi.prototype, "importSkill").mockResolvedValue(lobbySnapshot());
+    vi.spyOn(ArenaApi.prototype, "compileContract").mockResolvedValue(lobbyContract());
+    const startRun = vi.spyOn(ArenaApi.prototype, "startRun").mockResolvedValue(lobbyRun());
+    vi.spyOn(ArenaApi.prototype, "getRun").mockResolvedValue(lobbyRun());
+    vi.spyOn(ArenaApi.prototype, "openRunStream").mockReturnValue({
+      close: vi.fn(), onerror: null, onmessage: null, onopen: null
+    });
+    const user = userEvent.setup();
+    window.history.replaceState({}, "", "/?token=arena-secret");
+    render(<App />);
+
+    await user.type(
+      screen.getByRole("textbox", { name: "GitHub URL" }),
+      "https://github.com/example/skill"
+    );
+    await user.click(screen.getByRole("button", { name: "Inspect source" }));
+    await screen.findByText("LOCKED");
+    await user.click(screen.getByRole("radio", { name: /False Green Mimic/ }));
+    await user.click(screen.getByRole("button", { name: "Start Crash Test" }));
+
+    expect(await screen.findByRole("heading", { name: "False Green Mimic" })).toBeVisible();
+    expect(screen.queryByRole("heading", { name: "Dirty Tree" })).not.toBeInTheDocument();
+    expect(startRun).toHaveBeenCalledWith("repo-false-green-v1", hash);
+  });
+
+  it("rejects a terminal report that drifts from the locked run context", async () => {
+    vi.spyOn(ArenaApi.prototype, "health").mockResolvedValue(lobbyHealth());
+    vi.spyOn(ArenaApi.prototype, "listManifests").mockResolvedValue([falseGreenManifest()]);
+    vi.spyOn(ArenaApi.prototype, "importSkill").mockResolvedValue(lobbySnapshot());
+    vi.spyOn(ArenaApi.prototype, "compileContract").mockResolvedValue(lobbyContract());
+    vi.spyOn(ArenaApi.prototype, "startRun").mockResolvedValue(lobbyRun());
+    const completedRun: RunEnvelope = {
+      ...lobbyRun(), state: "completed", ended_at: "2026-07-15T00:01:00.000Z"
+    };
+    const getRun = vi.spyOn(ArenaApi.prototype, "getRun")
+      .mockResolvedValueOnce(lobbyRun())
+      .mockResolvedValueOnce(completedRun);
+    vi.spyOn(ArenaApi.prototype, "report").mockResolvedValue(
+      ArenaReportSchema.parse(sanitizedReport())
+    );
+    const source: ArenaEventSource = {
+      close: vi.fn<() => void>(), onerror: null, onmessage: null, onopen: null
+    };
+    vi.spyOn(ArenaApi.prototype, "openRunStream").mockReturnValue(source);
+    const user = userEvent.setup();
+    window.history.replaceState({}, "", "/?token=arena-secret");
+    render(<App />);
+
+    await user.type(
+      screen.getByRole("textbox", { name: "GitHub URL" }),
+      "https://github.com/example/skill"
+    );
+    await user.click(screen.getByRole("button", { name: "Inspect source" }));
+    await screen.findByText("LOCKED");
+    await user.click(screen.getByRole("button", { name: "Start Crash Test" }));
+    await waitFor(() => expect(getRun).toHaveBeenCalledTimes(1));
+    await act(async () => {
+      source.onmessage?.(new MessageEvent("message", { data: JSON.stringify({
+        v: 1,
+        run_id: "run_app_01",
+        seq: 1,
+        phase: "judge",
+        kind: "run.finished",
+        actor: "arena",
+        data: { status: "defeat" },
+        artifacts: []
+      }) }));
+      await Promise.resolve();
+    });
+
+    expect(await screen.findByRole("alert")).toHaveTextContent(
+      "Unable to refresh this run safely."
+    );
+    expect(screen.queryByText("80/100")).not.toBeInTheDocument();
+    expect(screen.getByRole("heading", { name: "False Green Mimic" })).toBeVisible();
   });
 });
 

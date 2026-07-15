@@ -6,7 +6,11 @@ import type {
   PreflightResult,
   ReplayManifest
 } from "../api.js";
-import type { SkillContract, SkillSnapshot } from "../../../../src/protocol/schema.js";
+import type {
+  RunEnvelope,
+  SkillContract,
+  SkillSnapshot
+} from "../../../../src/protocol/schema.js";
 
 type ImportLobbyApi = Pick<
   ArenaApi,
@@ -16,6 +20,10 @@ type ImportLobbyApi = Pick<
 export interface ImportLobbyProps {
   readonly api: ImportLobbyApi;
   readonly onRunStarted: (runId: string) => void;
+  readonly onRunContext?: (context: {
+    readonly run: RunEnvelope;
+    readonly manifest: ReplayManifest;
+  }) => void;
 }
 
 const STEPS = ["Source", "Inspect", "Configure", "Ready"] as const;
@@ -193,7 +201,11 @@ function PreflightPanel(props: {
   );
 }
 
-export function ImportLobby({ api, onRunStarted }: ImportLobbyProps): React.JSX.Element {
+export function ImportLobby({
+  api,
+  onRunContext,
+  onRunStarted
+}: ImportLobbyProps): React.JSX.Element {
   const [sourceTab, setSourceTab] = useState<SourceTab>("git");
   const [githubUrl, setGithubUrl] = useState("");
   const [localPath, setLocalPath] = useState("");
@@ -397,12 +409,13 @@ export function ImportLobby({ api, onRunStarted }: ImportLobbyProps): React.JSX.
     busyRef.current = true;
     const generation = stateGenerationRef.current;
     const runApi = api;
+    const manifestAtStart = manifest;
     setBusy("start");
     setError(null);
-    let createdRunId: string | null = null;
+    let createdRun: RunEnvelope | null = null;
     try {
       const run = await runApi.startRun(manifest.id, snapshot.source_hash);
-      createdRunId = run.run_id;
+      createdRun = run;
     } catch {
       if (mountedRef.current && stateGenerationRef.current === generation) {
         setError("Unable to start this run safely.");
@@ -413,8 +426,9 @@ export function ImportLobby({ api, onRunStarted }: ImportLobbyProps): React.JSX.
         setBusy(null);
       }
     }
-    if (createdRunId !== null && latestApiRef.current === runApi) {
-      onRunStarted(createdRunId);
+    if (createdRun !== null && latestApiRef.current === runApi) {
+      onRunContext?.({ run: createdRun, manifest: manifestAtStart });
+      onRunStarted(createdRun.run_id);
     }
   }
 
@@ -454,6 +468,7 @@ export function ImportLobby({ api, onRunStarted }: ImportLobbyProps): React.JSX.
             <div
               aria-labelledby={`source-tab-${sourceTab}`}
               id={`source-panel-${sourceTab}`}
+              key={sourceTab}
               role="tabpanel"
             >
               {sourceTab === "git" ? (
