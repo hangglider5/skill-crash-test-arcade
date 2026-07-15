@@ -2,6 +2,8 @@ import { mkdir, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
+import { z } from "zod";
+
 import { ArenaReportSchema } from "../apps/web/src/api.js";
 import { createDefaultServerDependencies } from "../src/core/cli.js";
 import { createServer } from "../src/core/server.js";
@@ -16,6 +18,18 @@ const PROJECT_ROOT = path.resolve(fileURLToPath(new URL("../", import.meta.url))
 const APP_DATA = path.join(PROJECT_ROOT, ".arena", "live-smoke");
 const TOKEN = "live-smoke-local-session";
 const TERMINAL_TIMEOUT_MS = 10 * 60_000;
+const LiveSmokePreflightSchema = z.object({
+  ok: z.boolean(),
+  checks: z.array(z.object({
+    id: z.enum(["codex-version", "codex-login", "git-version", "app-data"]),
+    ok: z.boolean(),
+    message: z.string().max(512)
+  }).strict()).min(1).max(16),
+  model: z.object({
+    target: z.literal("gpt-5.6"),
+    status: z.literal("configured-unverified")
+  }).strict()
+}).strict();
 
 export type LiveSmokeStage =
   | "preflight"
@@ -76,6 +90,10 @@ async function parseStage<T>(
   }
 }
 
+export async function parseLiveSmokePreflight(value: unknown) {
+  return parseStage("preflight", () => LiveSmokePreflightSchema.parse(value));
+}
+
 async function request(
   stage: LiveSmokeStage,
   url: string,
@@ -106,12 +124,9 @@ export async function smokeLiveCodex(): Promise<void> {
   const app = await createServer(dependencies, { appData: APP_DATA, sessionToken: TOKEN });
   const address = await app.listen({ host: "127.0.0.1", port: 0 });
   try {
-    const health = await parseStage("preflight", async () => (
+    const health = await parseLiveSmokePreflight(
       await request("preflight", `${address}/api/health`)
-    ) as {
-        ok: boolean;
-        checks: Array<{ id: string; ok: boolean }>;
-      });
+    );
     const required = new Set(["codex-version", "codex-login", "git-version", "app-data"]);
     if (!health.ok || health.checks.some((check) => required.has(check.id) && !check.ok)
       || [...required].some((id) => !health.checks.some((check) => check.id === id))) {

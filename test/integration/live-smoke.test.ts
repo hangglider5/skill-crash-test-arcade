@@ -2,10 +2,28 @@ import { describe, expect, it, vi } from "vitest";
 
 import {
   LiveSmokeRequestError,
+  parseLiveSmokePreflight,
   requestLiveSmokeJson
 } from "../../scripts/smoke-live-codex.js";
 
 describe("live smoke stage errors", () => {
+  it("maps malformed or unbounded preflight payloads to a safe stage-specific code", async () => {
+    await expect(parseLiveSmokePreflight({ ok: true })).rejects.toMatchObject({
+      stage: "preflight",
+      code: "LIVE_PREFLIGHT_SCHEMA_INVALID",
+      message: "Live smoke preflight request failed safely"
+    });
+    await expect(parseLiveSmokePreflight({
+      ok: true,
+      checks: Array.from({ length: 17 }, () => ({
+        id: "app-data",
+        ok: true,
+        message: "ready"
+      })),
+      model: { target: "gpt-5.6", status: "configured-unverified" }
+    })).rejects.toMatchObject({ code: "LIVE_PREFLIGHT_SCHEMA_INVALID" });
+  });
+
   it("maps a contract HTTP failure to a bounded stage-specific safe code", async () => {
     const secret = "sk-private-response-body";
     const fetchImpl = vi.fn(async () => new Response(secret, { status: 500 }));
