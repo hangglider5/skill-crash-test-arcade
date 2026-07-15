@@ -84,7 +84,6 @@ describe("scripted demo replay", () => {
       "verifier.completed",
       "run.finished"
     ]));
-
     expect(RunEnvelopeSchema.parse(first.run)).toEqual(first.run);
     expect(VerdictBundleSchema.parse(first.verdict)).toEqual(first.verdict);
     expect(DiagnosisSchema.parse(first.diagnosis)).toEqual(first.diagnosis);
@@ -142,6 +141,70 @@ describe("scripted demo replay", () => {
         : event)
     });
     expect(SampleReplaySchema.safeParse(withArtifacts([unreferenced])).success).toBe(false);
+
+    const recordedArtifact = (mime: string, bytes: Buffer) => ({
+      ...unreferenced,
+      ref: `sha256:${sha256(bytes)}`,
+      mime,
+      data: bytes.toString("base64")
+    });
+    const unsafeRecordedArtifacts = [
+      recordedArtifact("text/plain", Buffer.from("/Users/example/.ssh/id_ed25519\n")),
+      recordedArtifact("text/plain", Buffer.from("file:///tmp/arena-secret\n")),
+      recordedArtifact("text/plain", Buffer.from(`${tmpdir()}/arena-secret\n`)),
+      recordedArtifact("text/plain", Buffer.from("OPENAI_API_KEY=sk-demo-secret\n")),
+      recordedArtifact("application/json", Buffer.from(
+        `${canonicalJson({ safe: true, api_key: "sk-demo-secret" })}\n`
+      )),
+      recordedArtifact("application/json", Buffer.from("{not-json}\n")),
+      recordedArtifact("application/json", Buffer.from([0xc3, 0x28])),
+      recordedArtifact("text/x-diff", Buffer.from([
+        "diff --git a/src/value.ts b/src/value.ts",
+        "--- a/src/value.ts",
+        "+++ b/src/value.ts",
+        "@@ -1 +1 @@",
+        "-unredacted value",
+        "+[REDACTED]",
+        ""
+      ].join("\n"))),
+      recordedArtifact("text/x-diff", Buffer.from([
+        "diff --git a/src/value.ts b/src/value.ts",
+        "--- a/src/value.ts",
+        "+++ b/src/value.ts",
+        "@@ -1 +1 @@",
+        "-/Users/example/private.txt",
+        "+[REDACTED]",
+        ""
+      ].join("\n"))),
+      recordedArtifact("application/octet-stream", Buffer.from("opaque\n"))
+    ];
+    for (const artifact of unsafeRecordedArtifacts) {
+      expect(SampleReplaySchema.safeParse(withArtifacts(
+        [artifact],
+        [artifact.ref]
+      )).success).toBe(false);
+    }
+    const safeText = recordedArtifact(
+      "text/plain",
+      Buffer.from("[REDACTED RECORDED EVIDENCE]\n")
+    );
+    expect(SampleReplaySchema.safeParse(withArtifacts(
+      [safeText],
+      [safeText.ref]
+    )).success).toBe(true);
+    expect(first.trace.filter(({ kind }) => kind === "process.exited").map((event) => ({
+      span_id: event.span_id,
+      phase: event.phase,
+      argv: event.data.argv
+    }))).toEqual([
+      { span_id: "demo_git_status", phase: "patch", argv: ["git", "status", "--short"] },
+      {
+        span_id: "demo_verify_git_status",
+        phase: "verify",
+        argv: ["git", "status", "--short"]
+      },
+      { span_id: "demo_full_suite", phase: "verify", argv: ["npm", "test"] }
+    ]);
 
     const tooMany = Array.from({ length: 129 }, (_, index) => {
       const bytes = Buffer.from(`bounded evidence ${index}\n`);
@@ -292,7 +355,37 @@ describe("scripted demo replay", () => {
       });
       expect(response.statusCode).toBe(200);
       expect(response.json()).toEqual(sample);
-      expect(loadSampleReplay).toHaveBeenCalledTimes(1);
+      const unsafeBytes = Buffer.from("file:///Users/example/private.txt\n");
+      const unsafeRef = `sha256:${sha256(unsafeBytes)}`;
+      loadSampleReplay.mockResolvedValueOnce({
+        ...sample,
+        verdict: { ...sample.verdict, evidence: [...sample.verdict.evidence, unsafeRef] },
+        trace: sample.trace.map((event) => event.kind === "verifier.completed"
+          ? {
+            ...event,
+            data: {
+              ...event.data,
+              recorded_artifacts: [
+                ...(event.data.recorded_artifacts as unknown[]),
+                {
+                  ref: unsafeRef,
+                  mime: "text/plain",
+                  redacted: true,
+                  encoding: "base64",
+                  data: unsafeBytes.toString("base64")
+                }
+              ]
+            }
+          }
+          : event)
+      });
+      const unsafeResponse = await app.inject({
+        method: "GET",
+        url: "/api/samples/dirty-tree",
+        headers: { "x-arena-token": "sample-token" }
+      });
+      expect(unsafeResponse.statusCode).toBe(500);
+      expect(loadSampleReplay).toHaveBeenCalledTimes(2);
     } finally {
       await app.close();
     }

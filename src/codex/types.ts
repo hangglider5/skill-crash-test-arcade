@@ -56,6 +56,11 @@ export type AgentEventHandler = (
 
 export interface AgentRunner {
   run(input: AgentRunInput, onEvent: AgentEventHandler): Promise<AgentRunResult>;
+  /**
+   * Optional trusted adapter policy for assigning a normalized event to a
+   * lifecycle phase. Raw model output cannot opt into this hook.
+   */
+  classifyEventPhase?(event: Readonly<TraceEvent>): "verify" | undefined;
 }
 
 export interface ArtifactSink {

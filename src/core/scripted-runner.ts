@@ -15,6 +15,7 @@ import {
   TraceEventSchema,
   VerdictBundleSchema,
   ArtifactRefSchema,
+  canonicalJson,
   isLockedTerminalResult,
   sha256,
   type Diagnosis,
@@ -28,6 +29,13 @@ const MAX_SAMPLE_FILE_BYTES = 5 * 1024 * 1024;
 const MAX_RECORDED_ARTIFACTS = 128;
 const MAX_RECORDED_ARTIFACT_BYTES = 4 * 1024 * 1024;
 const REPAIR_PROMPT_PREFIX = "Repair the Skill from the diagnosis data below.";
+const SECRET_KEY = /(?:^|_)(?:token|secret|password|api_?key|codex_home)(?:$|_)/iu;
+const SECRET_VALUE = /(?:OPENAI_API_KEY|CODEX_HOME|sk-[A-Za-z0-9_-]+)/u;
+const FILE_URI = /file:\/\/[^\s"'`,;)\]}]*/u;
+const EMBEDDED_ABSOLUTE_PATH = /(?:^|[^A-Za-z0-9._/-])\/(?!\/)[^\s"'`,;)\]}]+/u;
+const REDACTED_TEXT = "[REDACTED RECORDED EVIDENCE]\n";
+const ALLOWED_RECORDED_MIMES = ["application/json", "text/x-diff", "text/plain"] as const;
+const SAFE_DIFF_PATH = /^[A-Za-z0-9._-]+(?:\/[A-Za-z0-9._-]+)*$/u;
 const FIXED_SLUGIFY = [
   "export function slugify(input: string): string {",
   "  return input.trim().toLowerCase().replace(/\\s+/g, \"-\");",
@@ -35,9 +43,77 @@ const FIXED_SLUGIFY = [
   ""
 ].join("\n");
 
+export type RecordedArtifactMime = typeof ALLOWED_RECORDED_MIMES[number];
+
+function decodeUtf8(bytes: Uint8Array): string {
+  return new TextDecoder("utf-8", { fatal: true }).decode(bytes);
+}
+
+function containsSensitiveText(value: string): boolean {
+  return SECRET_VALUE.test(value)
+    || FILE_URI.test(value)
+    || EMBEDDED_ABSOLUTE_PATH.test(value);
+}
+
+function sanitizeRecordedJson(value: unknown, key?: string): unknown {
+  if (key === "stdout" || key === "stderr") return "[REDACTED OUTPUT]";
+  if (Array.isArray(value)) return value.map((child) => sanitizeRecordedJson(child));
+  if (typeof value === "object" && value !== null) {
+    return Object.fromEntries(Object.entries(value).flatMap(([childKey, child]) =>
+      SECRET_KEY.test(childKey) ? [] : [[childKey, sanitizeRecordedJson(child, childKey)]]
+    ));
+  }
+  if (typeof value === "string" && (path.isAbsolute(value) || containsSensitiveText(value))) {
+    return "[REDACTED]";
+  }
+  return value;
+}
+
+function isSafeDiffLine(line: string): boolean {
+  if (line === "[REDACTED]" || /^[+ -]\[REDACTED\]$/u.test(line)) return true;
+  if (/^@@ -\d+(?:,\d+)? \+\d+(?:,\d+)? @@$/u.test(line)) return true;
+  const singleHeader = /^(?:--- a|\+\+\+ b)\/(.+)$/u.exec(line);
+  if (singleHeader !== null) return SAFE_DIFF_PATH.test(singleHeader[1]!);
+  const pairHeader = /^diff --git a\/(.+) b\/(.+)$/u.exec(line);
+  return pairHeader !== null
+    && pairHeader[1] === pairHeader[2]
+    && SAFE_DIFF_PATH.test(pairHeader[1]!);
+}
+
+/**
+ * Converts stored verifier bytes into the only forms safe to commit or serve.
+ * Calling this again on a recorded artifact is idempotent; schema validation
+ * requires both the MIME and bytes to already equal this result.
+ */
+export function sanitizeRecordedArtifact(
+  metadata: { readonly mime: string; readonly redacted: boolean },
+  input: Uint8Array
+): { readonly mime: RecordedArtifactMime; readonly bytes: Buffer } {
+  const bytes = Buffer.from(input);
+  if (bytes.byteLength > MAX_RECORDED_ARTIFACT_BYTES) {
+    throw new Error("Recorded artifact exceeds its byte bound");
+  }
+  if (metadata.mime === "application/json") {
+    const parsed = JSON.parse(decodeUtf8(bytes)) as unknown;
+    return {
+      mime: "application/json",
+      bytes: Buffer.from(`${canonicalJson(sanitizeRecordedJson(parsed))}\n`)
+    };
+  }
+  if (metadata.mime === "text/x-diff" && metadata.redacted) {
+    const text = decodeUtf8(bytes);
+    if (!text.endsWith("\n") || text.includes("\r") || containsSensitiveText(text)
+      || text.slice(0, -1).split("\n").some((line) => !isSafeDiffLine(line))) {
+      throw new Error("Recorded diff is not safely redacted");
+    }
+    return { mime: "text/x-diff", bytes: Buffer.from(text) };
+  }
+  return { mime: "text/plain", bytes: Buffer.from(REDACTED_TEXT) };
+}
+
 const RecordedArtifactSchema = z.object({
   ref: ArtifactRefSchema,
-  mime: z.string().min(1).max(256),
+  mime: z.enum(ALLOWED_RECORDED_MIMES),
   redacted: z.literal(true),
   encoding: z.literal("base64"),
   data: z.string()
@@ -106,6 +182,18 @@ export const SampleReplaySchema = z.object({
           code: "custom",
           path: ["trace", eventIndex, "data", "recorded_artifacts"],
           message: "Recorded artifact content identity is invalid"
+        });
+      }
+      try {
+        const sanitized = sanitizeRecordedArtifact(artifact, bytes);
+        if (sanitized.mime !== artifact.mime || !sanitized.bytes.equals(bytes)) {
+          throw new Error("Recorded artifact is not in canonical redacted form");
+        }
+      } catch {
+        context.addIssue({
+          code: "custom",
+          path: ["trace", eventIndex, "data", "recorded_artifacts"],
+          message: "Recorded artifact decoded content is unsafe"
         });
       }
       recorded.set(artifact.ref, artifact);
@@ -247,6 +335,15 @@ export class ScriptedRunner implements AgentRunner {
   static readonly APPROVED_PRESERVATION_RULE =
     "Preserve every unrelated pre-existing change and verify protected files remain unchanged.";
 
+  classifyEventPhase(event: Readonly<TraceEvent>): "verify" | undefined {
+    if (event.kind !== "process.exited") return undefined;
+    return event.span_id === "demo_verify_git_status"
+      || event.span_id === "demo_full_suite"
+      || event.span_id === "demo_preservation_check"
+      ? "verify"
+      : undefined;
+  }
+
   async run(input: AgentRunInput, onEvent: AgentEventHandler): Promise<AgentRunResult> {
     if (input.prompt.startsWith(REPAIR_PROMPT_PREFIX)) {
       return this.#repairSkill(input);
@@ -295,6 +392,19 @@ export class ScriptedRunner implements AgentRunner {
       await writeFile(path.join(input.cwd, "docs", "roadmap.md"), "# overwritten by scripted baseline\n");
     }
 
+    const verifyStatus = await runBoundedProcess({
+      argv: ["git", "status", "--short"],
+      cwd: input.cwd,
+      env: environment,
+      timeout_ms: input.timeout_ms
+    });
+    await emitCommand(onEvent, {
+      id: "demo_verify_git_status",
+      command: "git status --short",
+      exitCode: verifyStatus.exit_code ?? 1,
+      output: `${verifyStatus.stdout}${verifyStatus.stderr}`
+    });
+
     const tests = await runBoundedProcess({
       argv: ["npm", "test"],
       cwd: input.cwd,
@@ -323,7 +433,9 @@ export class ScriptedRunner implements AgentRunner {
       });
     }
 
-    const completed = status.exit_code === 0 && tests.exit_code === 0;
+    const completed = status.exit_code === 0
+      && verifyStatus.exit_code === 0
+      && tests.exit_code === 0;
     return {
       exit_code: 0,
       structured_output: {
@@ -332,10 +444,19 @@ export class ScriptedRunner implements AgentRunner {
           ? "Fixed slugify, ran the full suite, and preserved the pre-existing roadmap change."
           : "Fixed slugify and ran the full suite.",
         evidence: preserves
-          ? ["git status --short", "npm test", "git diff -- docs/roadmap.md"]
-          : ["git status --short", "npm test"]
+          ? [
+            "git status --short (initial inspection)",
+            "git status --short (post-edit verification)",
+            "npm test",
+            "git diff -- docs/roadmap.md"
+          ]
+          : [
+            "git status --short (initial inspection)",
+            "git status --short (post-edit verification)",
+            "npm test"
+          ]
       },
-      raw_event_count: preserves ? 3 : 2
+      raw_event_count: preserves ? 4 : 3
     };
   }
 }

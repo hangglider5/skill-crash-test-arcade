@@ -68,17 +68,23 @@ class ScriptedRunner implements AgentRunner {
         return operation();
       }
     };
-    await onEvent({
-      type: "item.completed",
-      item: {
-        id: "cmd_git_status",
-        type: "command_execution",
-        command: "git status --short",
-        exit_code: 0,
-        status: "completed",
-        aggregated_output: " M docs/roadmap.md\n"
-      }
-    }, delivery);
+    for (const [id, command] of [
+      ["demo_verify_git_status", "git status --short"],
+      ["demo_full_suite", "npm test"],
+      ["demo_test_alias", "npm t"]
+    ]) {
+      await onEvent({
+        type: "item.completed",
+        item: {
+          id,
+          type: "command_execution",
+          command,
+          exit_code: 0,
+          status: "completed",
+          aggregated_output: id === "demo_verify_git_status" ? " M docs/roadmap.md\n" : "ok\n"
+        }
+      }, delivery);
+    }
     await writeFile(
       path.join(input.cwd, "src/slugify.ts"),
       "export function slugify(input: string): string {\n  return input.trim().toLowerCase().replace(/\\s+/g, \"-\");\n}\n"
@@ -276,16 +282,29 @@ describe("RunOrchestrator", () => {
     expect(verdict.status).toBe("defeat");
     expect(verdict.hard_gate_failures).toEqual(["preserve_existing_changes"]);
     const events = await runStore.readEvents(run.run_id);
-    expect(events.map((event) => event.seq)).toEqual([0, 1, 2, 3, 4, 5]);
+    expect(events.map((event) => event.seq)).toEqual([0, 1, 2, 3, 4, 5, 6, 7]);
     expect(events.map((event) => event.kind)).toEqual([
       "run.started",
+      "process.exited",
+      "process.exited",
       "process.exited",
       "agent.claimed",
       "phase.entered",
       "verifier.completed",
       "run.finished"
     ]);
-    expect(published).toEqual([0, 1, 2, 3, 4, 5]);
+    expect(events.filter(({ kind }) => kind === "process.exited")
+      .map(({ span_id, phase, data }) => ({ span_id, phase, argv: data.argv })))
+      .toEqual([
+        {
+          span_id: "demo_verify_git_status",
+          phase: "patch",
+          argv: ["git", "status", "--short"]
+        },
+        { span_id: "demo_full_suite", phase: "patch", argv: ["npm", "test"] },
+        { span_id: "demo_test_alias", phase: "patch", argv: ["npm", "t"] }
+      ]);
+    expect(published).toEqual([0, 1, 2, 3, 4, 5, 6, 7]);
     expect(JSON.parse(await readFile(
       path.join(root, "runs", run.run_id, "verdict.json"),
       "utf8"

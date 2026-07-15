@@ -400,20 +400,6 @@ function event(input: Omit<TraceEvent, "v" | "artifacts"> & { artifacts?: TraceE
   return TraceEventSchema.parse({ v: 1, artifacts: [], ...input });
 }
 
-function classifyRunnerPhase(candidate: TraceEvent): TraceEvent["phase"] {
-  if (candidate.kind !== "process.started" && candidate.kind !== "process.exited") {
-    return candidate.phase;
-  }
-  const argv = candidate.data.argv;
-  if (!Array.isArray(argv) || !argv.every((part) => typeof part === "string")) {
-    return candidate.phase;
-  }
-  return (argv[0] === "git" && argv[1] === "status")
-    || (argv[0] === "npm" && argv[1] === "test")
-    ? "verify"
-    : candidate.phase;
-}
-
 export class RunOrchestrator {
   readonly #options: RunOrchestratorOptions;
   readonly #runs = new Map<string, RunContext>();
@@ -715,7 +701,7 @@ export class RunOrchestrator {
             TraceEventSchema.parse({
               ...candidate,
               seq: nextSeq + index,
-              phase: classifyRunnerPhase(candidate)
+              phase: this.#options.runner.classifyEventPhase?.(candidate) ?? candidate.phase
             })
           );
           nextSeq += committed.length;

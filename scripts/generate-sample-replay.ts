@@ -12,7 +12,7 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
-import { ArtifactStore, type ArtifactRecord } from "../src/arena/artifact-store.js";
+import { ArtifactStore } from "../src/arena/artifact-store.js";
 import { loadManifest } from "../src/arena/manifest.js";
 import { RunStore } from "../src/arena/run-store.js";
 import type { StructuredModel, StructuredRunRequest } from "../src/codex/structured.js";
@@ -23,6 +23,7 @@ import { RunOrchestrator } from "../src/core/orchestrator.js";
 import {
   SampleReplaySchema,
   ScriptedRunner,
+  sanitizeRecordedArtifact,
   type SampleReplay
 } from "../src/core/scripted-runner.js";
 import { computeSnapshotExecutionFingerprint } from "../src/core/snapshot-identity.js";
@@ -89,25 +90,6 @@ function sanitize(value: unknown): unknown {
   return value;
 }
 
-function sanitizeArtifactJson(value: unknown, key?: string): unknown {
-  if (key === "stdout" || key === "stderr") return "[REDACTED OUTPUT]";
-  if (Array.isArray(value)) return value.map((child) => sanitizeArtifactJson(child));
-  if (typeof value === "object" && value !== null) {
-    return Object.fromEntries(Object.entries(value).flatMap(([childKey, child]) =>
-      SECRET_KEY.test(childKey) ? [] : [[childKey, sanitizeArtifactJson(child, childKey)]]
-    ));
-  }
-  return sanitize(value);
-}
-
-function sanitizedArtifactBytes(record: ArtifactRecord, bytes: Buffer): Buffer {
-  if (record.mime === "application/json") {
-    return Buffer.from(`${canonicalJson(sanitizeArtifactJson(JSON.parse(bytes.toString("utf8"))))}\n`);
-  }
-  if (record.mime === "text/x-diff" && record.redacted) return bytes;
-  return Buffer.from("[REDACTED RECORDED EVIDENCE]\n");
-}
-
 async function bundleRecordedArtifacts(
   replay: SampleReplay,
   artifactStore: ArtifactStore
@@ -132,12 +114,13 @@ async function bundleRecordedArtifacts(
       artifactStore.stat(ref),
       artifactStore.read(ref)
     ]);
-    const bytes = sanitizedArtifactBytes(record, original);
+    const sanitized = sanitizeRecordedArtifact(record, original);
+    const bytes = sanitized.bytes;
     const nextRef = `sha256:${sha256(bytes)}`;
     replacement.set(ref, nextRef);
     records.set(nextRef, {
       ref: nextRef,
-      mime: record.mime,
+      mime: sanitized.mime,
       redacted: true,
       encoding: "base64",
       data: bytes.toString("base64")
