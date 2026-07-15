@@ -1257,6 +1257,77 @@ describe("startCli", () => {
     });
   });
 
+  it("does not publish a stale approval when a newer repair becomes active during coordinator work", async () => {
+    const first = repairProposal();
+    const second = {
+      ...first,
+      repair_id: "repair_02",
+      patch_ref: `sha256:${"e".repeat(64)}` as const
+    };
+    let createCount = 0;
+    let releaseApproval!: (value: RunEnvelope) => void;
+    const blockedApproval = new Promise<RunEnvelope>((resolve) => { releaseApproval = resolve; });
+    const registry = createProcessRepairRegistry({
+      async createRepairFork() {
+        createCount += 1;
+        return createCount === 1 ? first : second;
+      },
+      async readCandidatePatch() { throw new Error("unused"); },
+      async rejectRepair() {},
+      async approveAndRerun() { return blockedApproval; }
+    });
+    await registry.repairs.createRepairFork("run_01");
+    const staleApproval = registry.repairs.approveAndRerun(first.repair_id);
+    await registry.repairs.createRepairFork("run_01");
+    releaseApproval({ ...envelope("created"), run_id: "run_child", parent_run_id: "run_01" });
+
+    await expect(staleApproval).rejects.toThrow("not active");
+    await expect(registry.loadRepair("run_01")).resolves.toMatchObject({
+      repair_id: second.repair_id,
+      status: "pending"
+    });
+  });
+
+  it("allows approval to finish before a later repair becomes active", async () => {
+    const first = repairProposal();
+    const second = {
+      ...first,
+      repair_id: "repair_02",
+      patch_ref: `sha256:${"e".repeat(64)}` as const
+    };
+    let createCount = 0;
+    let releaseCreation!: () => void;
+    const blockedCreation = new Promise<void>((resolve) => { releaseCreation = resolve; });
+    let secondCreationEntered!: () => void;
+    const creationEntered = new Promise<void>((resolve) => { secondCreationEntered = resolve; });
+    const registry = createProcessRepairRegistry({
+      async createRepairFork() {
+        createCount += 1;
+        if (createCount === 2) {
+          secondCreationEntered();
+          await blockedCreation;
+        }
+        return createCount === 1 ? first : second;
+      },
+      async readCandidatePatch() { throw new Error("unused"); },
+      async rejectRepair() {},
+      async approveAndRerun() {
+        return { ...envelope("created"), run_id: "run_child", parent_run_id: "run_01" };
+      }
+    });
+    await registry.repairs.createRepairFork("run_01");
+    const creation = registry.repairs.createRepairFork("run_01");
+    await creationEntered;
+    await expect(registry.repairs.approveAndRerun(first.repair_id))
+      .resolves.toMatchObject({ run_id: "run_child" });
+    releaseCreation();
+    await creation;
+    await expect(registry.loadRepair("run_01")).resolves.toMatchObject({
+      repair_id: second.repair_id,
+      status: "pending"
+    });
+  });
+
   it("normalizes a real pending repair proposal for strict report export", async () => {
     const proposal = repairProposal();
     const registry = createProcessRepairRegistry({

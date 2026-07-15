@@ -308,6 +308,7 @@ async function repairFixture(
     readonly coordinatorCount?: number;
     readonly synchronizeRepairedImports?: boolean;
     readonly delayTrialReads?: boolean;
+    readonly beforeExecuteChildRun?: () => Promise<void>;
   } = {}
 ) {
   const root = await temporaryRoot();
@@ -403,7 +404,10 @@ async function repairFixture(
       createdChildren.push(child);
       return child;
     },
-    async executeChildRun(runId) { executed.push(runId); },
+    async executeChildRun(runId) {
+      await options.beforeExecuteChildRun?.();
+      executed.push(runId);
+    },
     async listRunsForGroup() {
       const observed = [baseline, ...createdChildren];
       if (options.delayTrialReads) {
@@ -438,6 +442,104 @@ async function repairFixture(
 }
 
 describe("RepairCoordinator", () => {
+  it("serializes approval before a later candidate creation for the same baseline", async () => {
+    let approvalEntered!: () => void;
+    const entered = new Promise<void>((resolve) => { approvalEntered = resolve; });
+    let releaseApproval!: () => void;
+    const blocked = new Promise<void>((resolve) => { releaseApproval = resolve; });
+    const fixture = await repairFixture(async (cwd) => {
+      await writeFile(path.join(cwd, "SKILL.md"), "# Stable repaired Skill\n");
+    }, {
+      fixedRepairedSnapshot: true,
+      async beforeExecuteChildRun() {
+        approvalEntered();
+        await blocked;
+      }
+    });
+    const first = await fixture.coordinator.createRepairFork("run_baseline");
+    const approval = fixture.coordinator.approveAndRerun(first.repair_id);
+    await entered;
+
+    let creationSettled = false;
+    const creation = fixture.coordinator.createRepairFork("run_baseline")
+      .finally(() => { creationSettled = true; });
+    await Promise.resolve();
+    expect(creationSettled).toBe(false);
+
+    releaseApproval();
+    await expect(approval).resolves.toMatchObject({ run_id: "run_child" });
+    const second = await creation;
+    expect(second.repair_id).toBe("repair_02");
+    expect(fixture.executed).toEqual(["run_child"]);
+    expect(JSON.parse(await readFile(
+      path.join(fixture.root, "runs", "run_baseline", "repair.json"), "utf8"
+    ))).toMatchObject({ repair_id: "repair_02", status: "pending" });
+  });
+
+  it("lets candidate supersession win before stale approval or rejection", async () => {
+    let editCount = 0;
+    let secondCreationEntered!: () => void;
+    const entered = new Promise<void>((resolve) => { secondCreationEntered = resolve; });
+    let releaseCreation!: () => void;
+    const blocked = new Promise<void>((resolve) => { releaseCreation = resolve; });
+    const fixture = await repairFixture(async (cwd) => {
+      editCount += 1;
+      if (editCount === 2) {
+        secondCreationEntered();
+        await blocked;
+      }
+      await writeFile(path.join(cwd, "SKILL.md"), "# Stable repaired Skill\n");
+    }, { fixedRepairedSnapshot: true });
+    const first = await fixture.coordinator.createRepairFork("run_baseline");
+    const creation = fixture.coordinator.createRepairFork("run_baseline");
+    await entered;
+
+    const staleApproval = fixture.coordinator.approveAndRerun(first.repair_id);
+    const staleRejection = fixture.coordinator.rejectRepair(first.repair_id);
+    const staleRead = fixture.coordinator.readCandidatePatch(first.repair_id);
+    const approvalFailure = expect(staleApproval).rejects.toThrow("Repair is not pending");
+    const rejectionFailure = expect(staleRejection).rejects.toThrow("Repair is not pending");
+    const readFailure = expect(staleRead).rejects.toThrow("Candidate patch is unavailable");
+    releaseCreation();
+    const second = await creation;
+
+    await approvalFailure;
+    await rejectionFailure;
+    await readFailure;
+    expect(fixture.executed).toEqual([]);
+    expect(JSON.parse(await readFile(
+      path.join(fixture.root, "runs", "run_baseline", "repair.json"), "utf8"
+    ))).toMatchObject({ repair_id: second.repair_id, status: "pending" });
+  });
+
+  it("does not let a failed queued creation poison the next review operation", async () => {
+    let editCount = 0;
+    let failedCreationEntered!: () => void;
+    const entered = new Promise<void>((resolve) => { failedCreationEntered = resolve; });
+    let releaseFailure!: () => void;
+    const blocked = new Promise<void>((resolve) => { releaseFailure = resolve; });
+    const fixture = await repairFixture(async (cwd) => {
+      editCount += 1;
+      if (editCount === 2) {
+        failedCreationEntered();
+        await blocked;
+        throw new Error("simulated candidate failure");
+      }
+      await writeFile(path.join(cwd, "SKILL.md"), "# Stable repaired Skill\n");
+    }, { fixedRepairedSnapshot: true });
+    const first = await fixture.coordinator.createRepairFork("run_baseline");
+    const failedCreation = fixture.coordinator.createRepairFork("run_baseline");
+    const creationFailure = expect(failedCreation).rejects.toThrow("simulated candidate failure");
+    await entered;
+
+    const approval = fixture.coordinator.approveAndRerun(first.repair_id);
+    releaseFailure();
+
+    await creationFailure;
+    await expect(approval).resolves.toMatchObject({ run_id: "run_child" });
+    expect(fixture.executed).toEqual(["run_child"]);
+  });
+
   it("repairs only the Skill entrypoint and reruns with exact child lineage", async () => {
     const fixture = await repairFixture(async (cwd) => {
       await writeFile(path.join(cwd, "SKILL.md"), "# Skill\n\nRun the protected full suite.\n");
@@ -524,6 +626,12 @@ describe("RepairCoordinator", () => {
     ));
     expect(record).toMatchObject({ status: "failed", error: { code: "REPAIR_APPROVAL_FAILED" } });
     expect(JSON.stringify(record)).not.toContain(fixture.root);
+
+    const next = await fixture.coordinator.createRepairFork("run_baseline");
+    expect(next.repair_id).toBe("repair_02");
+    expect(JSON.parse(await readFile(
+      path.join(fixture.root, "runs", "run_baseline", "repair.json"), "utf8"
+    ))).toMatchObject({ repair_id: "repair_02", status: "pending" });
   });
 
   it("persists an explicit rejection as a terminal review decision", async () => {
@@ -604,25 +712,22 @@ describe("RepairCoordinator", () => {
     ))).toEqual(new Set([expectedFingerprint]));
   });
 
-  it("allocates distinct trials across coordinators sharing one authority", async () => {
+  it("shares active repair authority across coordinators in one process", async () => {
     const fixture = await repairFixture(async (cwd) => {
       await writeFile(path.join(cwd, "SKILL.md"), "# Stable repaired Skill\n");
     }, {
       fixedRepairedSnapshot: true,
       coordinatorCount: 2,
-      synchronizeRepairedImports: true,
       delayTrialReads: true
     });
     const first = await fixture.coordinators[0]!.createRepairFork("run_baseline");
     const second = await fixture.coordinators[1]!.createRepairFork("run_baseline");
 
-    await Promise.all([
-      fixture.coordinators[0]!.approveAndRerun(first.repair_id),
-      fixture.coordinators[1]!.approveAndRerun(second.repair_id)
-    ]);
+    await expect(fixture.coordinators[0]!.approveAndRerun(first.repair_id))
+      .rejects.toThrow("Repair is not pending");
+    await fixture.coordinators[1]!.approveAndRerun(second.repair_id);
 
-    expect(fixture.childRequests.map(({ trial_index }) => trial_index).sort())
-      .toEqual([0, 1]);
+    expect(fixture.childRequests.map(({ trial_index }) => trial_index)).toEqual([0]);
   });
 
   it("allows an existing Markdown file explicitly linked by the entrypoint", async () => {

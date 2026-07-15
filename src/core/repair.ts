@@ -128,6 +128,9 @@ interface PendingRepair {
   state: "pending" | "approving" | "approved" | "failed" | "rejected";
 }
 
+const PROCESS_REPAIR_REVIEW_LOCKS = new Map<string, Promise<void>>();
+const PROCESS_ACTIVE_REPAIRS = new Map<string, PendingRepair>();
+
 function portableParts(value: string): string[] {
   if (path.posix.isAbsolute(value) || value.includes("\\")) throw new Error(`Unsafe snapshot path: ${value}`);
   const parts = value.split("/");
@@ -378,6 +381,10 @@ export class RepairCoordinator {
   }
 
   async createRepairFork(runId: string): Promise<RepairProposal> {
+    return this.#withRepairReviewLock(runId, () => this.#createRepairForkLocked(runId));
+  }
+
+  async #createRepairForkLocked(runId: string): Promise<RepairProposal> {
     const context = await this.#options.loadRunContext(runId);
     const baseline = RunEnvelopeSchema.parse(context.envelope);
     const verdict = VerdictBundleSchema.parse(await this.#options.loadVerdict(runId));
@@ -483,10 +490,10 @@ export class RepairCoordinator {
     };
     await verifySnapshot(snapshot, originalModes);
     await this.#options.runStore.writeRecord(runId, "repair.json", { schema: "arena.repair/v1", repair_id: repairId, run_id: runId, status: "pending", snapshot_hash: baseline.snapshot_hash, created_at: createdAt, changed_paths: changedPaths, patch_ref: artifact.ref });
-    const previousId = this.#activeRepairByRun.get(runId);
-    const previous = previousId === undefined ? undefined : this.#repairs.get(previousId);
+    const authorityKey = this.#repairReviewKey(runId);
+    const previous = PROCESS_ACTIVE_REPAIRS.get(authorityKey);
     if (previous?.state === "pending") previous.state = "rejected";
-    this.#repairs.set(repairId, {
+    const pending: PendingRepair = {
       proposal, baseline, manifestId: context.manifest_id, originalModes,
       ownedDirectory, ownedSource,
       reviewedInventory: await inventory(source),
@@ -496,16 +503,28 @@ export class RepairCoordinator {
       sourcePath: source,
       snapshotExecutionFingerprint: validatedSnapshot.execution_fingerprint,
       state: "pending"
-    });
+    };
+    this.#repairs.set(repairId, pending);
     this.#activeRepairByRun.set(runId, repairId);
+    PROCESS_ACTIVE_REPAIRS.set(authorityKey, pending);
     return proposal;
   }
 
   async readCandidatePatch(repairId: string): Promise<CandidatePatch> {
     const repair = this.#repairs.get(repairId);
+    if (repair === undefined) throw new Error("Candidate patch is unavailable");
+    return this.#withRepairReviewLock(
+      repair.proposal.run_id,
+      () => this.#readCandidatePatchLocked(repairId)
+    );
+  }
+
+  async #readCandidatePatchLocked(repairId: string): Promise<CandidatePatch> {
+    const repair = this.#repairs.get(repairId);
     if (repair === undefined || repair.proposal.repair_id !== repairId
       || repair.state !== "pending"
-      || this.#activeRepairByRun.get(repair.proposal.run_id) !== repairId) {
+      || this.#activeRepairByRun.get(repair.proposal.run_id) !== repairId
+      || PROCESS_ACTIVE_REPAIRS.get(this.#repairReviewKey(repair.proposal.run_id)) !== repair) {
       throw new Error("Candidate patch is unavailable");
     }
     const record = await this.#options.artifactStore.stat(repair.proposal.patch_ref);
@@ -538,8 +557,18 @@ export class RepairCoordinator {
 
   async rejectRepair(repairId: string): Promise<void> {
     const repair = this.#repairs.get(repairId);
+    if (repair === undefined) throw new Error(`Repair is not pending: ${repairId}`);
+    return this.#withRepairReviewLock(
+      repair.proposal.run_id,
+      () => this.#rejectRepairLocked(repairId)
+    );
+  }
+
+  async #rejectRepairLocked(repairId: string): Promise<void> {
+    const repair = this.#repairs.get(repairId);
     if (repair?.state !== "pending"
-      || this.#activeRepairByRun.get(repair.proposal.run_id) !== repairId) {
+      || this.#activeRepairByRun.get(repair.proposal.run_id) !== repairId
+      || PROCESS_ACTIVE_REPAIRS.get(this.#repairReviewKey(repair.proposal.run_id)) !== repair) {
       throw new Error(`Repair is not pending: ${repairId}`);
     }
     await this.#options.runStore.writeRecord(repair.baseline.run_id, "repair.json", {
@@ -554,8 +583,18 @@ export class RepairCoordinator {
 
   async approveAndRerun(repairId: string): Promise<RunEnvelope> {
     const repair = this.#repairs.get(repairId);
+    if (repair === undefined) throw new Error(`Repair is not pending: ${repairId}`);
+    return this.#withRepairReviewLock(
+      repair.proposal.run_id,
+      () => this.#approveAndRerunLocked(repairId)
+    );
+  }
+
+  async #approveAndRerunLocked(repairId: string): Promise<RunEnvelope> {
+    const repair = this.#repairs.get(repairId);
     if (repair?.state !== "pending"
-      || this.#activeRepairByRun.get(repair.proposal.run_id) !== repairId) {
+      || this.#activeRepairByRun.get(repair.proposal.run_id) !== repairId
+      || PROCESS_ACTIVE_REPAIRS.get(this.#repairReviewKey(repair.proposal.run_id)) !== repair) {
       throw new Error(`Repair is not pending: ${repairId}`);
     }
     repair.state = "approving";
@@ -691,6 +730,25 @@ export class RepairCoordinator {
     } finally {
       if (PROCESS_TRIAL_ALLOCATION_LOCKS.get(key) === tail) {
         PROCESS_TRIAL_ALLOCATION_LOCKS.delete(key);
+      }
+    }
+  }
+
+  #repairReviewKey(runId: string): string {
+    return canonicalJson([this.#options.trialCoordinationDomain, runId]);
+  }
+
+  async #withRepairReviewLock<T>(runId: string, operation: () => Promise<T>): Promise<T> {
+    const key = this.#repairReviewKey(runId);
+    const previous = PROCESS_REPAIR_REVIEW_LOCKS.get(key) ?? Promise.resolve();
+    const result = previous.then(operation, operation);
+    const tail = result.then(() => undefined, () => undefined);
+    PROCESS_REPAIR_REVIEW_LOCKS.set(key, tail);
+    try {
+      return await result;
+    } finally {
+      if (PROCESS_REPAIR_REVIEW_LOCKS.get(key) === tail) {
+        PROCESS_REPAIR_REVIEW_LOCKS.delete(key);
       }
     }
   }

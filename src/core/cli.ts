@@ -85,6 +85,10 @@ export function createProcessRepairRegistry(
         const { record } = activeRecord(repairId);
         if (record.status !== "pending") throw new Error("Candidate patch is unavailable");
         const candidate = await coordinator.readCandidatePatch(repairId);
+        const { record: current } = activeRecord(repairId);
+        if (current !== record || current.status !== "pending") {
+          throw new Error("Candidate patch is unavailable");
+        }
         if (candidate.repair_id !== repairId || candidate.patch_ref !== record.patch_ref) {
           throw new Error("Candidate patch is unavailable");
         }
@@ -94,6 +98,10 @@ export function createProcessRepairRegistry(
         const { record } = activeRecord(repairId);
         if (record.status !== "pending") throw new Error(`Repair is not pending: ${repairId}`);
         await coordinator.rejectRepair(repairId);
+        const { record: current } = activeRecord(repairId);
+        if (current !== record || current.status !== "pending") {
+          throw new Error(`Repair is not pending: ${repairId}`);
+        }
         const rejected = { ...record, status: "rejected", reason: { code: "USER_REJECTED" } };
         records.set(repairId, rejected);
         return rejected;
@@ -103,28 +111,38 @@ export function createProcessRepairRegistry(
         if (existing.status !== "pending") {
           throw new Error(`Repair is not pending: ${repairId}`);
         }
+        let child;
         try {
-          const child = await coordinator.approveAndRerun(repairId);
-          const { error: _error, child_run_id: _child, new_snapshot_hash: _snapshot, ...base }
-            = existing as Record<string, unknown>;
-          records.set(repairId, {
-            ...base,
-            status: "approved",
-            child_run_id: child.run_id,
-            new_snapshot_hash: child.snapshot_hash,
-            reviewed_patch_ref: existing.patch_ref
-          });
-          return child;
+          child = await coordinator.approveAndRerun(repairId);
         } catch (error) {
-          const { error: _error, child_run_id: _child, new_snapshot_hash: _snapshot, ...base }
-            = existing as Record<string, unknown>;
-          records.set(repairId, {
-            ...base,
-            status: "failed",
-            error: { code: "REPAIR_APPROVAL_FAILED" }
-          });
+          const current = records.get(repairId);
+          const runId = typeof current?.run_id === "string" ? current.run_id : undefined;
+          if (current === existing && runId !== undefined
+            && activeByRun.get(runId) === repairId && current.status === "pending") {
+            const { error: _error, child_run_id: _child, new_snapshot_hash: _snapshot, ...base }
+              = current;
+            records.set(repairId, {
+              ...base,
+              status: "failed",
+              error: { code: "REPAIR_APPROVAL_FAILED" }
+            });
+          }
           throw error;
         }
+        const { record: current } = activeRecord(repairId);
+        if (current !== existing || current.status !== "pending") {
+          throw new Error(`Repair is not active: ${repairId}`);
+        }
+        const { error: _error, child_run_id: _child, new_snapshot_hash: _snapshot, ...base }
+          = current;
+        records.set(repairId, {
+          ...base,
+          status: "approved",
+          child_run_id: child.run_id,
+          new_snapshot_hash: child.snapshot_hash,
+          reviewed_patch_ref: current.patch_ref
+        });
+        return child;
       }
     },
     loadRepair: async (runId) => {
