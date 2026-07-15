@@ -8,6 +8,7 @@ const artifactRef = `sha256:${"b".repeat(64)}`;
 function terminalReport(artifact: Record<string, unknown>): Record<string, unknown> {
   return {
     schema: "arena.report/v1",
+    redaction_complete: true,
     run: {
       schema: "arena.run/v1",
       run_id: "run_01",
@@ -96,5 +97,49 @@ describe("Arena report artifact metadata", () => {
       await expect(apiFor(report).report("run_01"))
         .rejects.toMatchObject({ code: "INVALID_RESPONSE" } satisfies Partial<ApiError>);
     }
+  });
+});
+
+describe("Candidate patch API", () => {
+  it("parses only bounded authenticated local-review patches", async () => {
+    const text = "diff --git a/SKILL.md b/SKILL.md\n";
+    const fetchMock = vi.fn<typeof fetch>().mockResolvedValue(new Response(JSON.stringify({
+      repair_id: "repair/01",
+      mime: "text/x-diff",
+      bytes: new TextEncoder().encode(text).byteLength,
+      redacted: false,
+      export_ready: false,
+      text
+    }), { status: 200, headers: { "content-type": "application/json" } }));
+    const api = new ArenaApi("session-token", { fetch: fetchMock });
+
+    await expect(api.candidatePatch("repair/01")).resolves.toMatchObject({
+      repair_id: "repair/01",
+      redacted: false,
+      export_ready: false,
+      text
+    });
+    expect(String(fetchMock.mock.calls[0]![0])).toBe("/api/repairs/repair%2F01/patch");
+    expect(new Headers(fetchMock.mock.calls[0]![1]?.headers).get("x-arena-token"))
+      .toBe("session-token");
+  });
+
+  it.each([
+    ["wrong MIME", { mime: "text/plain" }],
+    ["pretend redacted", { redacted: true }],
+    ["pretend export ready", { export_ready: true }],
+    ["wrong byte count", { bytes: 1 }],
+    ["extra field", { artifact_ref: artifactRef }]
+  ])("rejects %s", async (_label, override) => {
+    const text = "diff --git a b\n";
+    await expect(apiFor({
+      repair_id: "repair_01",
+      mime: "text/x-diff",
+      bytes: new TextEncoder().encode(text).byteLength,
+      redacted: false,
+      export_ready: false,
+      text,
+      ...override
+    }).candidatePatch("repair_01")).rejects.toMatchObject({ code: "INVALID_RESPONSE" });
   });
 });

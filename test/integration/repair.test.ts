@@ -465,6 +465,20 @@ describe("RepairCoordinator", () => {
       .rejects.toThrow();
     expect((await fixture.artifactStore.read(proposal.patch_ref)).toString())
       .toContain("Run the protected full suite");
+    await expect(fixture.artifactStore.stat(proposal.patch_ref)).resolves.toMatchObject({
+      mime: "text/x-diff",
+      redacted: false
+    });
+    await expect(fixture.coordinator.readCandidatePatch(proposal.repair_id)).resolves
+      .toMatchObject({
+        repair_id: proposal.repair_id,
+        mime: "text/x-diff",
+        redacted: false,
+        export_ready: false,
+        text: expect.stringContaining("Run the protected full suite")
+      });
+    await expect(fixture.coordinator.readCandidatePatch("repair_unknown"))
+      .rejects.toThrow("Candidate patch is unavailable");
     const persisted = JSON.parse(await readFile(
       path.join(fixture.root, "runs", "run_baseline", "repair.json"), "utf8"
     ));

@@ -46,6 +46,7 @@ import { validateSnapshotIdentity } from "./snapshot-identity.js";
 
 const MAX_JSON_BYTES = 5 * 1024 * 1024;
 const MAX_ARCHIVE_BYTES = 16 * 1024 * 1024;
+const MAX_CANDIDATE_PATCH_BYTES = 5 * 1024 * 1024;
 const TERMINAL_EVENTS = new Set<TraceEvent["kind"]>(["run.finished", "run.errored"]);
 
 export interface ServerDependencies {
@@ -72,6 +73,7 @@ export interface ServerDependencies {
   readonly diagnosis: { diagnoseRun(runId: string): Promise<Diagnosis> };
   readonly repairs: {
     createRepairFork(runId: string): Promise<unknown>;
+    readCandidatePatch(repairId: string): Promise<unknown>;
     approveAndRerun(repairId: string): Promise<RunEnvelope>;
   };
   readonly loadVerdict: (runId: string) => Promise<VerdictBundle>;
@@ -335,6 +337,19 @@ const RepairReportSchema = z.discriminatedUnion("status", [
     error: z.object({ code: z.string().min(1) }).strict()
   }).strict()
 ]);
+
+const CandidatePatchSchema = z.object({
+  repair_id: z.string().min(1),
+  mime: z.literal("text/x-diff"),
+  bytes: z.number().int().nonnegative().max(MAX_CANDIDATE_PATCH_BYTES),
+  redacted: z.literal(false),
+  export_ready: z.literal(false),
+  text: z.string().max(MAX_CANDIDATE_PATCH_BYTES)
+}).strict().superRefine((candidate, context) => {
+  if (Buffer.byteLength(candidate.text, "utf8") !== candidate.bytes) {
+    context.addIssue({ code: "custom", path: ["bytes"], message: "Patch byte count mismatch" });
+  }
+});
 
 function reportRepair(value: unknown): z.infer<typeof RepairReportSchema> {
   return RepairReportSchema.parse(value);
@@ -649,6 +664,15 @@ export async function createServer(
     return reply.code(201).send(value);
   });
 
+  app.get("/api/repairs/:id/patch", async (request) => {
+    const repairId = (request.params as { id: string }).id;
+    const candidate = CandidatePatchSchema.parse(
+      await dependencies.repairs.readCandidatePatch(repairId)
+    );
+    if (candidate.repair_id !== repairId) throw new Error("Candidate patch membership mismatch");
+    return candidate;
+  });
+
   app.post("/api/repairs/:id/rerun", async (request, reply) => {
     const value = await dependencies.repairs.approveAndRerun((request.params as { id: string }).id);
     return reply.code(202).send(value);
@@ -706,6 +730,7 @@ export async function createServer(
     ];
     const report = sanitize({
       schema: "arena.report/v1",
+      redaction_complete: true,
       run: parsedRun,
       manifest_id: context.manifest_id,
       snapshot: reportSnapshot(parsedSnapshot),

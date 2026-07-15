@@ -51,7 +51,7 @@ interface CliOptions {
 }
 
 export function createProcessRepairRegistry(
-  coordinator: Pick<RepairCoordinator, "createRepairFork" | "approveAndRerun">
+  coordinator: Pick<RepairCoordinator, "createRepairFork" | "readCandidatePatch" | "approveAndRerun">
 ): Pick<ServerDependencies, "repairs" | "loadRepair"> {
   const records = new Map<string, unknown>();
   const owners = new Map<string, string>();
@@ -62,6 +62,12 @@ export function createProcessRepairRegistry(
         records.set(runId, { schema: "arena.repair/v1", ...value });
         owners.set(value.repair_id, runId);
         return value;
+      },
+      async readCandidatePatch(repairId) {
+        if (!owners.has(repairId)) throw new Error("Candidate patch is unavailable");
+        const candidate = await coordinator.readCandidatePatch(repairId);
+        if (candidate.repair_id !== repairId) throw new Error("Candidate patch is unavailable");
+        return candidate;
       },
       async approveAndRerun(repairId) {
         const runId = owners.get(repairId);

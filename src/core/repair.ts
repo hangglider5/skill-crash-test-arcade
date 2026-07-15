@@ -60,6 +60,15 @@ export interface RepairProposal {
   readonly patch_ref: ArtifactRef;
 }
 
+export interface CandidatePatch {
+  readonly repair_id: string;
+  readonly mime: "text/x-diff";
+  readonly bytes: number;
+  readonly redacted: false;
+  readonly export_ready: false;
+  readonly text: string;
+}
+
 export class RepairApprovalError extends Error {
   readonly code = "REPAIR_APPROVAL_FAILED" as const;
 
@@ -456,7 +465,10 @@ export class RepairCoordinator {
     const patch = await git(["diff", "--no-ext-diff", "--binary", "--"]);
     if (patch.length === 0) throw new Error("Repair mutation produced an empty patch");
     await writeFile(path.join(repairDirectory, "repair.patch"), patch, { flag: "wx", mode: 0o600 });
-    const artifact = await this.#options.artifactStore.put(Buffer.from(patch), { mime: "text/x-diff", redacted: true });
+    const artifact = await this.#options.artifactStore.put(Buffer.from(patch), {
+      mime: "text/x-diff",
+      redacted: false
+    });
     const createdAt = (this.#options.now?.() ?? new Date()).toISOString();
     const proposal: RepairProposal = {
       repair_id: repairId,
@@ -481,6 +493,38 @@ export class RepairCoordinator {
       state: "pending"
     });
     return proposal;
+  }
+
+  async readCandidatePatch(repairId: string): Promise<CandidatePatch> {
+    const repair = this.#repairs.get(repairId);
+    if (repair === undefined || repair.proposal.repair_id !== repairId) {
+      throw new Error("Candidate patch is unavailable");
+    }
+    const record = await this.#options.artifactStore.stat(repair.proposal.patch_ref);
+    if (record.ref !== repair.proposal.patch_ref
+      || record.mime !== "text/x-diff"
+      || record.redacted !== false
+      || record.bytes > MAX_REPAIR_TOTAL_BYTES) {
+      throw new Error("Candidate patch is unavailable");
+    }
+    const bytes = await this.#options.artifactStore.read(repair.proposal.patch_ref);
+    if (bytes.byteLength !== record.bytes || sha256(bytes) !== repair.patchDigest) {
+      throw new Error("Candidate patch is unavailable");
+    }
+    let text: string;
+    try {
+      text = new TextDecoder("utf-8", { fatal: true }).decode(bytes);
+    } catch {
+      throw new Error("Candidate patch is unavailable");
+    }
+    return {
+      repair_id: repairId,
+      mime: "text/x-diff",
+      bytes: record.bytes,
+      redacted: false,
+      export_ready: false,
+      text
+    };
   }
 
   async approveAndRerun(repairId: string): Promise<RunEnvelope> {

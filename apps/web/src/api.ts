@@ -78,6 +78,19 @@ const RepairProposalSchema = z.object({
   patch_ref: ArtifactRefSchema
 }).strict();
 
+export const CandidatePatchSchema = z.object({
+  repair_id: z.string().min(1),
+  mime: z.literal("text/x-diff"),
+  bytes: z.number().int().nonnegative().max(5 * 1024 * 1024),
+  redacted: z.literal(false),
+  export_ready: z.literal(false),
+  text: z.string().max(5 * 1024 * 1024)
+}).strict().superRefine((patch, context) => {
+  if (new TextEncoder().encode(patch.text).byteLength !== patch.bytes) {
+    context.addIssue({ code: "custom", path: ["bytes"], message: "Patch byte count mismatch" });
+  }
+});
+
 export const SanitizedSnapshotSchema = z.object({
   schema: z.literal("arena.skill-snapshot/v1"),
   source: z.object({
@@ -179,6 +192,7 @@ export const SanitizedRepairSchema = z.discriminatedUnion("status", [
 
 export const ArenaReportSchema = z.object({
   schema: z.literal("arena.report/v1"),
+  redaction_complete: z.boolean(),
   run: RunEnvelopeSchema,
   manifest_id: z.string().min(1),
   snapshot: SanitizedSnapshotSchema,
@@ -250,6 +264,7 @@ const SAFE_ERROR_MESSAGES = new Map<string, string>([
 export type PreflightResult = z.infer<typeof PreflightResultSchema>;
 export type ReplayManifest = z.infer<typeof ReplayManifestSchema>;
 export type RepairProposal = z.infer<typeof RepairProposalSchema>;
+export type CandidatePatch = z.infer<typeof CandidatePatchSchema>;
 export type SanitizedSnapshot = z.infer<typeof SanitizedSnapshotSchema>;
 export type SanitizedVerdict = z.infer<typeof SanitizedVerdictSchema>;
 export type SanitizedTrace = z.infer<typeof SanitizedTraceSchema>;
@@ -387,6 +402,13 @@ export class ArenaApi {
     return this.request(`/api/runs/${encoded(runId)}/repairs`, RepairProposalSchema, {
       method: "POST"
     });
+  }
+
+  candidatePatch(repairId: string): Promise<CandidatePatch> {
+    return this.request(
+      `/api/repairs/${encoded(repairId)}/patch`,
+      CandidatePatchSchema
+    );
   }
 
   rerun(repairId: string): Promise<RunEnvelope> {

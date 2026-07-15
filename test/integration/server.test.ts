@@ -239,6 +239,16 @@ function dependencies(overrides: Partial<ServerDependencies> = {}): ServerDepend
           patch_ref: `sha256:${"d".repeat(64)}`
         };
       },
+      async readCandidatePatch(repairId) {
+        return {
+          repair_id: repairId,
+          mime: "text/x-diff",
+          bytes: 15,
+          redacted: false,
+          export_ready: false,
+          text: "diff --git a b\n"
+        };
+      },
       async approveAndRerun() { return { ...created, parent_run_id: "run_01" }; }
     },
     async loadVerdict() { return verdict(); },
@@ -304,6 +314,7 @@ describe("Loopback API", () => {
       ["GET", "/api/runs/run_01"],
       ["POST", "/api/runs/run_01/diagnose"],
       ["POST", "/api/runs/run_01/repairs"],
+      ["GET", "/api/repairs/repair_01/patch"],
       ["POST", "/api/repairs/repair_01/rerun"],
       ["GET", "/api/runs/run_01/report"]
     ] as const;
@@ -330,6 +341,16 @@ describe("Loopback API", () => {
         ...dependencies().orchestrator,
         execute
       }
+    });
+    (deps.repairs as typeof deps.repairs & {
+      readCandidatePatch(repairId: string): Promise<Record<string, unknown>>;
+    }).readCandidatePatch = async (repairId) => ({
+      repair_id: repairId,
+      mime: "text/x-diff",
+      bytes: 15,
+      redacted: false,
+      export_ready: false,
+      text: "diff --git a b\n"
     });
     const app = await createServer(deps, {
       sessionToken: "test-token",
@@ -370,6 +391,15 @@ describe("Loopback API", () => {
       .toMatchObject({ schema: "arena.diagnosis/v1" });
     expect((await app.inject({ method: "POST", url: "/api/runs/run_01/repairs", headers: auth })).json())
       .toMatchObject({ repair_id: "repair_01" });
+    expect((await app.inject({ method: "GET", url: "/api/repairs/repair_01/patch", headers: auth })).json())
+      .toEqual({
+        repair_id: "repair_01",
+        mime: "text/x-diff",
+        bytes: 15,
+        redacted: false,
+        export_ready: false,
+        text: "diff --git a b\n"
+      });
     expect((await app.inject({ method: "POST", url: "/api/repairs/repair_01/rerun", headers: auth })).json())
       .toMatchObject({ parent_run_id: "run_01" });
     await app.close();
@@ -678,7 +708,10 @@ describe("Loopback API", () => {
       throw new Error("report response waited for cleanup");
     }
     expect(response.statusCode).toBe(200);
-    expect(response.json()).toMatchObject({ schema: "arena.report/v1" });
+    expect(response.json()).toMatchObject({
+      schema: "arena.report/v1",
+      redaction_complete: true
+    });
     expect(response.body).not.toContain(secretSource);
     expect(response.body).not.toContain("CODEX_HOME");
     expect(response.body).not.toContain("OPENAI_API_KEY");
@@ -1100,6 +1133,7 @@ describe("startCli", () => {
     const proposal = repairProposal();
     const registry = createProcessRepairRegistry({
       async createRepairFork() { return proposal; },
+      async readCandidatePatch() { throw new Error("unused"); },
       async approveAndRerun() { return envelope("created"); }
     });
 
@@ -1130,6 +1164,7 @@ describe("startCli", () => {
     const proposal = repairProposal();
     const registry = createProcessRepairRegistry({
       async createRepairFork() { return proposal; },
+      async readCandidatePatch() { throw new Error("unused"); },
       async approveAndRerun() {
         throw new Error("ENOENT: '/Users/alice/private/repair'");
       }
@@ -1152,6 +1187,7 @@ describe("startCli", () => {
     const approveAndRerun = vi.fn(async () => child);
     const registry = createProcessRepairRegistry({
       async createRepairFork() { return proposal; },
+      async readCandidatePatch() { throw new Error("unused"); },
       approveAndRerun
     });
 
@@ -1190,6 +1226,7 @@ describe("startCli", () => {
     });
     const registry = createProcessRepairRegistry({
       async createRepairFork() { return proposal; },
+      async readCandidatePatch() { throw new Error("unused"); },
       approveAndRerun
     });
 

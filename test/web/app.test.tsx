@@ -3,7 +3,12 @@ import { act, fireEvent, render, screen, waitFor } from "@testing-library/react"
 import { userEvent } from "@testing-library/user-event";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
-import { App, RunSession, type ActiveRunContext } from "../../apps/web/src/App.js";
+import {
+  App,
+  RunSession,
+  VerdictSession,
+  type ActiveRunContext
+} from "../../apps/web/src/App.js";
 import {
   ApiError,
   ArenaApi,
@@ -155,6 +160,7 @@ function sanitizedReport(options: {
   };
   return {
     schema: "arena.report/v1",
+    redaction_complete: true,
     run: runRecord(),
     manifest_id: "repo-dirty-tree-v1",
     snapshot: {
@@ -248,6 +254,77 @@ afterEach(() => {
 });
 
 describe("App", () => {
+  it("keeps diagnosis, repair, and rerun explicit in the verdict session", async () => {
+    const user = userEvent.setup();
+    const initialValue = sanitizedReport();
+    delete initialValue.diagnosis;
+    const initial = ArenaReportSchema.parse(initialValue);
+    const diagnosed = ArenaReportSchema.parse(sanitizedReport());
+    const repaired = ArenaReportSchema.parse(sanitizedReport({
+      repair: sanitizedRepair("pending")
+    }));
+    const patchText = "diff --git a/SKILL.md b/SKILL.md\n";
+    const child: RunEnvelope = {
+      ...initial.run,
+      run_id: "run_child",
+      parent_run_id: "run/01",
+      snapshot_hash: hashB,
+      state: "created",
+      started_at: "2026-07-15T00:03:00.000Z"
+    };
+    delete (child as { ended_at?: string }).ended_at;
+    const api = {
+      diagnose: vi.fn().mockResolvedValue(diagnosed.diagnosis),
+      createRepair: vi.fn().mockResolvedValue({
+        repair_id: "repair/01",
+        run_id: "run/01",
+        status: "pending",
+        snapshot_hash: hash,
+        created_at: "2026-07-15T00:02:00.000Z",
+        changed_paths: ["SKILL.md"],
+        patch_ref: `sha256:${hash}`
+      }),
+      candidatePatch: vi.fn().mockResolvedValue({
+        repair_id: "repair/01",
+        mime: "text/x-diff",
+        bytes: new TextEncoder().encode(patchText).byteLength,
+        redacted: false,
+        export_ready: false,
+        text: patchText
+      }),
+      rerun: vi.fn().mockResolvedValue(child),
+      report: vi.fn()
+        .mockResolvedValueOnce(diagnosed)
+        .mockResolvedValueOnce(repaired)
+    } as unknown as ArenaApi;
+    const onChildRunStarted = vi.fn();
+    render(
+      <VerdictSession
+        api={api}
+        initialBaseline={initial}
+        onChildRunStarted={onChildRunStarted}
+      />
+    );
+
+    expect(api.diagnose).not.toHaveBeenCalled();
+    expect(api.createRepair).not.toHaveBeenCalled();
+    expect(api.rerun).not.toHaveBeenCalled();
+
+    await user.click(screen.getByRole("button", { name: "Diagnose locked defeat" }));
+    expect(api.diagnose).toHaveBeenCalledWith("run/01");
+    expect(await screen.findByText("failure")).toBeVisible();
+
+    await user.click(screen.getByRole("button", { name: "Create repair candidate" }));
+    expect(api.createRepair).toHaveBeenCalledWith("run/01");
+    expect(api.candidatePatch).toHaveBeenCalledWith("repair/01");
+    expect(await screen.findByText("diff --git a/SKILL.md b/SKILL.md", { exact: false }))
+      .toBeVisible();
+
+    await user.click(screen.getByRole("button", { name: "Approve & Rerun" }));
+    expect(api.rerun).toHaveBeenCalledWith("repair/01");
+    expect(onChildRunStarted).toHaveBeenCalledWith(child);
+  });
+
   it("atomically remounts a keyed run session when run context changes", async () => {
     const firstSource: ArenaEventSource = {
       close: vi.fn<() => void>(), onerror: null, onmessage: null, onopen: null

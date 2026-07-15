@@ -10,7 +10,7 @@
     "dev": "concurrently -k -n core,web \"pnpm dev:core\" \"pnpm dev:web\"",
     "dev:core": "tsx watch src/core/cli.ts --dev-token dev-token",
     "dev:web": "vite",
-    "build": "vite build && tsup src/core/cli.ts --format esm --out-dir dist/core",
+    "build": "tsup src/core/cli.ts --format esm --out-dir dist/core && vite build",
     "start": "node dist/core/cli.js",
     "test": "vitest run",
     "test:watch": "vitest",
