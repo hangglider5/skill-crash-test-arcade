@@ -66,7 +66,11 @@ describe("CodexProcessRunner", () => {
 
     try {
       const result = await processRunner.run(input, async (event) => { events.push(event); });
-      const structured = result.structured_output as { argv: string[]; env: Record<string, string> };
+      const structured = result.structured_output as {
+        argv: string[];
+        env: Record<string, string>;
+        prompt: string;
+      };
       expect(result.exit_code).toBe(0);
       expect(events).toHaveLength(5);
       const outputStats = await lstat(input.output_path);
@@ -84,8 +88,9 @@ describe("CodexProcessRunner", () => {
         "--sandbox", "workspace-write", "--model", "gpt-5.6",
         "--output-schema", input.output_schema_path,
         "--output-last-message", input.output_path,
-        "--cd", input.cwd, "ok"
+        "--cd", input.cwd
       ]);
+      expect(structured.prompt).toBe("ok");
       expect(structured.env.ARBITRARY_PARENT_SECRET).toBeUndefined();
       expect(structured.env.OPENAI_API_KEY).toBeUndefined();
       expect(Object.keys(structured.env).every((key) => ["PATH", "HOME", "CODEX_HOME", "TMPDIR", "LANG", "LC_ALL", "LC_CTYPE", "__CF_USER_TEXT_ENCODING"].includes(key))).toBe(true);
@@ -93,6 +98,23 @@ describe("CodexProcessRunner", () => {
       delete process.env.ARBITRARY_PARENT_SECRET;
       delete process.env.OPENAI_API_KEY;
     }
+  });
+
+  it("rejects an oversized prompt before spawning", async () => {
+    const input = await fixture("x".repeat(1_025));
+    await expect(runner(input, { maxPromptBytes: 1_024 }).run(input, async () => {}))
+      .rejects.toMatchObject({ code: "RUNNER_PROMPT_TOO_LARGE" });
+    await expect(lstat(input.output_path)).rejects.toMatchObject({ code: "ENOENT" });
+  });
+
+  it("fails safely when Codex closes stdin before accepting the prompt", async () => {
+    const input = await fixture("x".repeat(2 * 1024 * 1024));
+    const processRunner = runner(input, {
+      prefixArgs: [fakeScriptPath, "--close-stdin"]
+    });
+
+    await expect(processRunner.run(input, async () => {}))
+      .rejects.toMatchObject({ code: "RUNNER_STDIN_FAILED" });
   });
 
   it.each(["CODEX_HOME", "OPENAI_API_KEY", "MY_TOKEN", "safe.key", "BAD-KEY"])(

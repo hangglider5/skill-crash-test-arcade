@@ -1,10 +1,18 @@
 import { writeFile } from "node:fs/promises";
+import { closeSync } from "node:fs";
 import { spawn } from "node:child_process";
 
 const args = process.argv.slice(2);
+if (args[0] === "--close-stdin") {
+  closeSync(0);
+  await new Promise((resolve) => setTimeout(resolve, 100));
+  process.exit(0);
+}
 const valueAfter = (flag) => args[args.indexOf(flag) + 1];
 const outputPath = valueAfter("--output-last-message") ?? valueAfter("-o");
-const prompt = args.at(-1);
+const promptChunks = [];
+for await (const chunk of process.stdin) promptChunks.push(chunk);
+const prompt = Buffer.concat(promptChunks).toString("utf8");
 
 if (prompt === "timeout") {
   setInterval(() => {}, 1_000);
@@ -63,6 +71,7 @@ if (prompt === "timeout") {
     completed: true,
     summary: "Task complete",
     argv: args,
+    prompt,
     env: process.env
   }));
 }

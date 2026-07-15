@@ -15,6 +15,8 @@ import type {
 export type RunnerErrorCode =
   | "RUNNER_TOOL_ENV_INVALID"
   | "RUNNER_UNSUPPORTED_PLATFORM"
+  | "RUNNER_PROMPT_TOO_LARGE"
+  | "RUNNER_STDIN_FAILED"
   | "RUNNER_OUTPUT_PATH_INVALID"
   | "RUNNER_SPAWN"
   | "RUNNER_JSONL_INVALID"
@@ -50,6 +52,7 @@ export interface CodexProcessRunnerOptions {
   maxStdoutBytes?: number;
   maxStderrBytes?: number;
   maxOutputBytes?: number;
+  maxPromptBytes?: number;
   callbackTimeoutMs?: number;
   killGraceMs?: number;
   parentEnv?: NodeJS.ProcessEnv;
@@ -105,8 +108,7 @@ export function buildCodexArguments(input: AgentRunInput): string[] {
     "--output-last-message",
     input.output_path,
     "--cd",
-    input.cwd,
-    input.prompt
+    input.cwd
   ];
 }
 
@@ -245,6 +247,7 @@ export class CodexProcessRunner implements AgentRunner {
   readonly #maxStdoutBytes: number;
   readonly #maxStderrBytes: number;
   readonly #maxOutputBytes: number;
+  readonly #maxPromptBytes: number;
   readonly #callbackTimeoutMs: number;
   readonly #killGraceMs: number;
   readonly #parentEnv: NodeJS.ProcessEnv;
@@ -261,6 +264,7 @@ export class CodexProcessRunner implements AgentRunner {
     this.#maxStdoutBytes = options.maxStdoutBytes ?? 16 * 1024 * 1024;
     this.#maxStderrBytes = options.maxStderrBytes ?? 1024 * 1024;
     this.#maxOutputBytes = options.maxOutputBytes ?? 1024 * 1024;
+    this.#maxPromptBytes = options.maxPromptBytes ?? 8 * 1024 * 1024;
     this.#callbackTimeoutMs = options.callbackTimeoutMs ?? 5_000;
     this.#killGraceMs = options.killGraceMs ?? 1_000;
     this.#parentEnv = sanitizedParentEnv(options.parentEnv ?? process.env);
@@ -285,6 +289,9 @@ export class CodexProcessRunner implements AgentRunner {
   }
 
   async run(input: AgentRunInput, onEvent: AgentEventHandler): Promise<AgentRunResult> {
+    if (Buffer.byteLength(input.prompt, "utf8") > this.#maxPromptBytes) {
+      throw new RunnerError("RUNNER_PROMPT_TOO_LARGE", "The Codex prompt exceeded the byte limit");
+    }
     let ownedOutput;
     try {
       ownedOutput = await validateOwnedOutputPath(this.#ownedOutputRoot, input.output_path, input.output_schema_path);
@@ -315,7 +322,7 @@ export class CodexProcessRunner implements AgentRunner {
           env: this.#parentEnv,
           shell: false,
           detached: true,
-          stdio: ["ignore", "pipe", "pipe"]
+          stdio: ["pipe", "pipe", "pipe"]
         });
       } catch {
         reject(new RunnerError("RUNNER_SPAWN", "Unable to start the Codex process"));
@@ -344,6 +351,7 @@ export class CodexProcessRunner implements AgentRunner {
       const forceStop = () => {
         if (stopping || childClosed) return;
         stopping = true;
+        child.stdin.destroy();
         try { signalGroup(child.pid, "SIGTERM"); } catch { /* KILL attempt still follows */ }
         killHandle = setTimeout(() => {
           if (childClosed) return;
@@ -355,6 +363,15 @@ export class CodexProcessRunner implements AgentRunner {
         if (!primaryError) primaryError = error;
         forceStop();
       };
+
+      child.stdin.once("error", () => {
+        if (settled || childClosed) return;
+        recordFailure(new RunnerError(
+          "RUNNER_STDIN_FAILED",
+          "The Codex prompt could not be delivered"
+        ));
+      });
+      child.stdin.end(input.prompt, "utf8");
 
       const storeFailureEvidence = (
         error: RunnerError,
@@ -452,6 +469,7 @@ export class CodexProcessRunner implements AgentRunner {
 
       child.once("close", (code) => {
         childClosed = true;
+        child.stdin.destroy();
         if (killHandle) clearTimeout(killHandle);
         if (timeoutHandle) clearTimeout(timeoutHandle);
         void (async () => {
