@@ -13,8 +13,23 @@ const outputPath = valueAfter("--output-last-message") ?? valueAfter("-o");
 const promptChunks = [];
 for await (const chunk of process.stdin) promptChunks.push(chunk);
 const prompt = Buffer.concat(promptChunks).toString("utf8");
+const stdinPreamble = "Reading prompt from stdin...";
+const oneEvent = '{"type":"thread.started","thread_id":"thread_fake"}';
+const malformedPreambleOutput = new Map([
+  ["stdin-preamble-duplicate", `${stdinPreamble}\n${stdinPreamble}\n`],
+  ["stdin-preamble-after-event", `${oneEvent}\n${stdinPreamble}\n`],
+  ["stdin-preamble-prefix", `prefix ${stdinPreamble}\n`],
+  ["stdin-preamble-suffix", `${stdinPreamble} suffix\n`],
+  ["stdin-preamble-ansi", `\u001b[32m${stdinPreamble}\u001b[0m\n`],
+  ["stdin-preamble-unknown", "Reading additional input from stdin...\n"]
+]);
 
-if (prompt === "timeout") {
+if (prompt === "stdin-preamble") {
+  process.stdout.write(`${stdinPreamble}\n${oneEvent}\n`);
+  await writeFile(outputPath, '{"completed":true,"summary":"ok"}');
+} else if (malformedPreambleOutput.has(prompt)) {
+  process.stdout.write(malformedPreambleOutput.get(prompt));
+} else if (prompt === "timeout") {
   setInterval(() => {}, 1_000);
 } else if (prompt === "ignore-term") {
   process.on("SIGTERM", () => {});

@@ -80,7 +80,7 @@ describe("CodexProcessRunner", () => {
         ino: outputStats.ino
       });
       expect(structured.argv).toEqual([
-        "exec", "--json", "--ephemeral", "--ignore-user-config", "--ignore-rules",
+        "exec", "--json", "--color", "never", "--ephemeral", "--ignore-user-config", "--ignore-rules",
         "-c", "shell_environment_policy.inherit=none",
         "-c", 'shell_environment_policy.set.CI="1"',
         "-c", 'shell_environment_policy.set.NO_COLOR="true"',
@@ -141,6 +141,32 @@ describe("CodexProcessRunner", () => {
     const result = await runner(input).run(input, async (event) => { events.push(event); });
     expect(events).toHaveLength(1);
     expect(result.exit_code).toBe(0);
+  });
+
+  it("tolerates one exact Codex stdin preamble only before the first JSON event", async () => {
+    const events: unknown[] = [];
+    const input = await fixture("stdin-preamble");
+    const result = await runner(input).run(input, async (event) => { events.push(event); });
+
+    expect(events).toMatchObject([{ type: "thread.started" }]);
+    expect(result.raw_event_count).toBe(1);
+  });
+
+  it.each([
+    ["stdin-preamble-duplicate", "Reading prompt from stdin..."],
+    ["stdin-preamble-after-event", "Reading prompt from stdin..."],
+    ["stdin-preamble-prefix", "prefix Reading prompt from stdin..."],
+    ["stdin-preamble-suffix", "Reading prompt from stdin... suffix"],
+    ["stdin-preamble-ansi", "\u001b[32mReading prompt from stdin...\u001b[0m"],
+    ["stdin-preamble-unknown", "Reading additional input from stdin..."]
+  ] as const)("rejects non-exact or misplaced Codex preamble %s", async (prompt, evidence) => {
+    const sink = new RecordingSink();
+    const input = await fixture(prompt);
+
+    await expect(runner(input, { artifactSink: sink }).run(input, async () => {}))
+      .rejects.toMatchObject({ code: "RUNNER_JSONL_INVALID" });
+    expect(sink.writes).toHaveLength(1);
+    expect(sink.writes[0]?.text).toBe(evidence);
   });
 
   it("stores an invalid original line without putting it in the typed error message", async () => {

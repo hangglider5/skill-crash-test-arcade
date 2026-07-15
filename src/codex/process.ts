@@ -61,6 +61,9 @@ export interface CodexProcessRunnerOptions {
 
 const TOOL_ENV_KEYS = new Set(["PATH", "HOME", "TMPDIR", "LANG", "LC_ALL", "CI", "NO_COLOR"]);
 const PARENT_ENV_KEYS = ["PATH", "HOME", "CODEX_HOME", "TMPDIR", "LANG", "LC_ALL", "LC_CTYPE"] as const;
+// Codex CLI 0.144.2 emits this one fixed line before JSONL when the sole prompt
+// is read from stdin. Keep the exception byte-exact and first-line-only.
+const CODEX_STDIN_PREAMBLE = Buffer.from("Reading prompt from stdin...", "utf8");
 
 function sanitizedParentEnv(source: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
   const env: NodeJS.ProcessEnv = {};
@@ -93,6 +96,8 @@ export function buildCodexArguments(input: AgentRunInput): string[] {
   return [
     "exec",
     "--json",
+    "--color",
+    "never",
     "--ephemeral",
     "--ignore-user-config",
     "--ignore-rules",
@@ -311,6 +316,7 @@ export class CodexProcessRunner implements AgentRunner {
       let lineBuffer = Buffer.alloc(0);
       const stderrParts: Buffer[] = [];
       let rawEventCount = 0;
+      let sawNonemptyStdoutLine = false;
       let work = Promise.resolve();
       let primaryError: RunnerError | undefined;
       let parseHalted = false;
@@ -392,6 +398,8 @@ export class CodexProcessRunner implements AgentRunner {
       const parseLine = (line: Buffer) => {
         const normalized = line.at(-1) === 13 ? line.subarray(0, -1) : line;
         if (normalized.byteLength === 0 || parseHalted || primaryError) return;
+        const isFirstNonemptyStdoutLine = !sawNonemptyStdoutLine;
+        sawNonemptyStdoutLine = true;
         if (normalized.byteLength > this.#maxLineBytes) {
           storeFailureEvidence(
             new RunnerError("RUNNER_STDOUT_LINE_TOO_LARGE", "Codex JSONL line exceeded the byte limit"),
@@ -399,6 +407,7 @@ export class CodexProcessRunner implements AgentRunner {
           );
           return;
         }
+        if (isFirstNonemptyStdoutLine && normalized.equals(CODEX_STDIN_PREAMBLE)) return;
         let parsed: unknown;
         try {
           parsed = JSON.parse(normalized.toString("utf8"));
