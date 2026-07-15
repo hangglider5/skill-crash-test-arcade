@@ -59,10 +59,10 @@ function verdict(status: "victory" | "defeat" | "error" = "defeat"): SanitizedVe
 
 function baseline(status: "victory" | "defeat" | "error" = "defeat"): LockedResultView {
   return {
-    run: run(),
+    run: run(status === "error" ? { state: "errored" } : {}),
     verdict: verdict(status),
     redaction_complete: true,
-    failure_chain: status === "defeat" ? [
+    failed_verifier_evidence: status === "defeat" ? [
       { label: "Protected draft existed before the run", evidence_refs: ["event:4"] },
       { label: "Repair step changed docs/roadmap.md", evidence_refs: ["event:37", artifactRef] },
       { label: "Hard gate locked the defeat", evidence_refs: ["event:38"] }
@@ -83,20 +83,34 @@ function diagnosis(): Diagnosis {
   };
 }
 
-function repair(): CandidateRepairView {
+function repair(status: "pending" | "approved" = "pending"): CandidateRepairView {
+  const proposal = status === "approved" ? {
+    schema: "arena.repair/v1" as const,
+    repair_id: "repair_01",
+    run_id: "run_baseline",
+    status,
+    snapshot_hash: hashA,
+    created_at: "2026-07-15T00:02:00.000Z",
+    changed_paths: ["SKILL.md"],
+    patch_ref: artifactRef,
+    reviewed_patch_ref: artifactRef,
+    child_run_id: "run_child",
+    new_snapshot_hash: hashB
+  } : {
+    schema: "arena.repair/v1" as const,
+    repair_id: "repair_01",
+    run_id: "run_baseline",
+    status,
+    snapshot_hash: hashA,
+    created_at: "2026-07-15T00:02:00.000Z",
+    changed_paths: ["SKILL.md"],
+    patch_ref: artifactRef
+  };
   return {
-    proposal: {
-      schema: "arena.repair/v1",
-      repair_id: "repair_01",
-      run_id: "run_baseline",
-      status: "pending",
-      snapshot_hash: hashA,
-      created_at: "2026-07-15T00:02:00.000Z",
-      changed_paths: ["SKILL.md"],
-      patch_ref: artifactRef
-    },
+    proposal,
     patch: {
       repair_id: "repair_01",
+      patch_ref: artifactRef,
       mime: "text/x-diff",
       bytes: 108,
       redacted: false,
@@ -116,7 +130,7 @@ function child(overrides: Partial<RunEnvelope> = {}): LockedResultView {
     }),
     verdict: { ...verdict("victory"), run_id: "run_child" },
     redaction_complete: true,
-    failure_chain: []
+    failed_verifier_evidence: []
   };
 }
 
@@ -124,7 +138,7 @@ function actions() {
   return {
     onDiagnose: vi.fn<() => Promise<void>>().mockResolvedValue(undefined),
     onCreateRepair: vi.fn<() => Promise<void>>().mockResolvedValue(undefined),
-    onReject: vi.fn<() => void>(),
+    onReject: vi.fn<() => Promise<void>>().mockResolvedValue(undefined),
     onApproveRerun: vi.fn<() => Promise<void>>().mockResolvedValue(undefined),
     onExportReport: vi.fn<() => Promise<void>>().mockResolvedValue(undefined),
     onEvidenceSelect: vi.fn<(ref: EvidenceRef) => void>()
@@ -146,6 +160,33 @@ function deferred<T>(): {
 }
 
 describe("VerdictCompare", () => {
+  it.each([
+    ["running victory", run({ state: "running", ended_at: undefined }), verdict("victory")],
+    ["errored victory", run({ state: "errored" }), verdict("victory")],
+    ["victory with hard-gate failures", run(), {
+      ...verdict("victory"),
+      hard_gate_failures: ["gate_01"]
+    }]
+  ])("does not present %s as a locked result", (_label, invalidRun, invalidVerdict) => {
+    render(
+      <VerdictCompare
+        {...actions()}
+        baseline={{
+          run: invalidRun,
+          verdict: invalidVerdict,
+          redaction_complete: true,
+          failed_verifier_evidence: []
+        }}
+      />
+    );
+
+    expect(screen.queryByText(/LOCKED/)).not.toBeInTheDocument();
+    expect(screen.queryByText(/\/ 100/)).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /Diagnose|repair|Rerun|Export/i }))
+      .not.toBeInTheDocument();
+    expect(screen.getByText("Result unavailable")).toBeVisible();
+  });
+
   it("renders a locked evidence-linked defeat and an explicit repair comparison", async () => {
     const user = userEvent.setup();
     const callbacks = actions();
@@ -155,7 +196,7 @@ describe("VerdictCompare", () => {
         baseline={baseline()}
         child={child()}
         diagnosis={diagnosis()}
-        repair={repair()}
+        repair={repair("approved")}
       />
     );
 
@@ -164,6 +205,8 @@ describe("VerdictCompare", () => {
     expect(screen.getByText("preserve_existing_changes")).toBeVisible();
     expect(screen.getByText("ADVISORY")).toBeVisible();
     expect(screen.getByText("Original unchanged")).toBeVisible();
+    expect(screen.getByRole("heading", { name: "Failed verifier evidence" })).toBeVisible();
+    expect(screen.queryByText(/consequential|failure chain/i)).not.toBeInTheDocument();
     expect(screen.getByText("Observed improvement")).toBeVisible();
     expect(screen.queryByText("Causal proof")).not.toBeInTheDocument();
 
@@ -175,8 +218,39 @@ describe("VerdictCompare", () => {
 
     await user.click(screen.getAllByRole("button", { name: "event:37" })[0]!);
     expect(callbacks.onEvidenceSelect).toHaveBeenCalledWith("event:37");
-    await user.click(screen.getByRole("button", { name: "Approve & Rerun" }));
-    expect(callbacks.onApproveRerun).toHaveBeenCalledTimes(1);
+    expect(screen.getByRole("button", { name: "Approve & Rerun" })).toBeDisabled();
+  });
+
+  it("does not compare or export a child that is not bound to the reviewed approved patch", () => {
+    const { rerender } = render(
+      <VerdictCompare
+        {...actions()}
+        baseline={baseline()}
+        child={child()}
+        repair={repair("pending")}
+      />
+    );
+
+    expect(screen.getByText("Non-comparable result")).toBeVisible();
+    expect(screen.queryByText("Observed improvement")).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Export report" })).toBeDisabled();
+
+    const approved = repair("approved");
+    if (approved.proposal.status !== "approved") throw new Error("test repair must be approved");
+    rerender(
+      <VerdictCompare
+        {...actions()}
+        baseline={baseline()}
+        child={child()}
+        repair={{
+          ...approved,
+          proposal: { ...approved.proposal, reviewed_patch_ref: `sha256:${hashB}` }
+        }}
+      />
+    );
+    expect(screen.getByText("Non-comparable result")).toBeVisible();
+    expect(screen.queryByText("Observed improvement")).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Export report" })).toBeDisabled();
   });
 
   it("locks errors without a fabricated score and reports non-comparable lineage", () => {

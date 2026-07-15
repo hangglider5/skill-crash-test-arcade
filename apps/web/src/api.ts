@@ -9,6 +9,7 @@ import {
   HashSchema,
   PhaseSchema,
   RunEnvelopeSchema,
+  isLockedTerminalResult,
   SkillContractSchema,
   SkillSnapshotSchema,
   TraceKindSchema,
@@ -80,6 +81,7 @@ const RepairProposalSchema = z.object({
 
 export const CandidatePatchSchema = z.object({
   repair_id: z.string().min(1),
+  patch_ref: ArtifactRefSchema,
   mime: z.literal("text/x-diff"),
   bytes: z.number().int().nonnegative().max(5 * 1024 * 1024),
   redacted: z.literal(false),
@@ -181,14 +183,28 @@ export const SanitizedRepairSchema = z.discriminatedUnion("status", [
     ...SanitizedRepairBase,
     status: z.literal("approved"),
     child_run_id: z.string().min(1),
-    new_snapshot_hash: HashSchema
+    new_snapshot_hash: HashSchema,
+    reviewed_patch_ref: ArtifactRefSchema
+  }).strict(),
+  z.object({
+    ...SanitizedRepairBase,
+    status: z.literal("rejected"),
+    reason: z.object({ code: z.enum(["USER_REJECTED", "SUPERSEDED"]) }).strict()
   }).strict(),
   z.object({
     ...SanitizedRepairBase,
     status: z.literal("failed"),
     error: z.object({ code: z.string().min(1) }).strict()
   }).strict()
-]);
+]).superRefine((repair, context) => {
+  if (repair.status === "approved" && repair.reviewed_patch_ref !== repair.patch_ref) {
+    context.addIssue({
+      code: "custom",
+      path: ["reviewed_patch_ref"],
+      message: "Approved repair must name the reviewed patch"
+    });
+  }
+});
 
 export const ArenaReportSchema = z.object({
   schema: z.literal("arena.report/v1"),
@@ -202,6 +218,13 @@ export const ArenaReportSchema = z.object({
   trace: z.array(SanitizedTraceSchema),
   artifacts: z.array(ArtifactSummarySchema).max(128)
 }).strict().superRefine((report, context) => {
+  if (!isLockedTerminalResult(report.run, report.verdict)) {
+    context.addIssue({
+      code: "custom",
+      path: ["verdict"],
+      message: "Run and verdict do not form a locked terminal result"
+    });
+  }
   const members = new Set<string>();
   const add = (candidate: unknown): void => {
     const parsed = ArtifactRefSchema.safeParse(candidate);
@@ -413,6 +436,12 @@ export class ArenaApi {
 
   rerun(repairId: string): Promise<RunEnvelope> {
     return this.request(`/api/repairs/${encoded(repairId)}/rerun`, RunEnvelopeSchema, {
+      method: "POST"
+    });
+  }
+
+  rejectRepair(repairId: string): Promise<SanitizedRepair> {
+    return this.request(`/api/repairs/${encoded(repairId)}/reject`, SanitizedRepairSchema, {
       method: "POST"
     });
   }

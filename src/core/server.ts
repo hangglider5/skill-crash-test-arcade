@@ -29,6 +29,7 @@ import {
   DiagnosisSchema,
   HashSchema,
   RunEnvelopeSchema,
+  isLockedTerminalResult,
   SkillSnapshotSchema,
   TraceEventSchema,
   VerdictBundleSchema,
@@ -74,6 +75,7 @@ export interface ServerDependencies {
   readonly repairs: {
     createRepairFork(runId: string): Promise<unknown>;
     readCandidatePatch(repairId: string): Promise<unknown>;
+    rejectRepair(repairId: string): Promise<unknown>;
     approveAndRerun(repairId: string): Promise<RunEnvelope>;
   };
   readonly loadVerdict: (runId: string) => Promise<VerdictBundle>;
@@ -329,17 +331,32 @@ const RepairReportSchema = z.discriminatedUnion("status", [
     ...RepairReportBase,
     status: z.literal("approved"),
     child_run_id: z.string().min(1),
-    new_snapshot_hash: HashSchema
+    new_snapshot_hash: HashSchema,
+    reviewed_patch_ref: ArtifactRefSchema
+  }).strict(),
+  z.object({
+    ...RepairReportBase,
+    status: z.literal("rejected"),
+    reason: z.object({ code: z.enum(["USER_REJECTED", "SUPERSEDED"]) }).strict()
   }).strict(),
   z.object({
     ...RepairReportBase,
     status: z.literal("failed"),
     error: z.object({ code: z.string().min(1) }).strict()
   }).strict()
-]);
+]).superRefine((repair, context) => {
+  if (repair.status === "approved" && repair.reviewed_patch_ref !== repair.patch_ref) {
+    context.addIssue({
+      code: "custom",
+      path: ["reviewed_patch_ref"],
+      message: "Approved repair must name the reviewed patch"
+    });
+  }
+});
 
 const CandidatePatchSchema = z.object({
   repair_id: z.string().min(1),
+  patch_ref: ArtifactRefSchema,
   mime: z.literal("text/x-diff"),
   bytes: z.number().int().nonnegative().max(MAX_CANDIDATE_PATCH_BYTES),
   redacted: z.literal(false),
@@ -678,6 +695,15 @@ export async function createServer(
     return reply.code(202).send(value);
   });
 
+  app.post("/api/repairs/:id/reject", async (request) => {
+    const repairId = (request.params as { id: string }).id;
+    const value = reportRepair(await dependencies.repairs.rejectRepair(repairId));
+    if (value.repair_id !== repairId || value.status !== "rejected") {
+      throw new Error("Rejected repair membership mismatch");
+    }
+    return value;
+  });
+
   app.get("/api/runs/:id/report", async (request, reply) => {
     const runId = (request.params as { id: string }).id;
     let clientAborted = request.raw.aborted;
@@ -710,6 +736,9 @@ export async function createServer(
       || (parsedRepair !== undefined && (parsedRepair.run_id !== runId
         || parsedRepair.snapshot_hash !== parsedRun.snapshot_hash))) {
       throw new Error("Report record membership mismatch");
+    }
+    if (!isLockedTerminalResult(parsedRun, parsedVerdict)) {
+      throw new Error("Report run and verdict are not a locked terminal result");
     }
     for (const [index, event] of parsedTrace.entries()) {
       if (event.run_id !== runId || event.seq !== index) {

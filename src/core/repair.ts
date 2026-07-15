@@ -62,6 +62,7 @@ export interface RepairProposal {
 
 export interface CandidatePatch {
   readonly repair_id: string;
+  readonly patch_ref: ArtifactRef;
   readonly mime: "text/x-diff";
   readonly bytes: number;
   readonly redacted: false;
@@ -124,7 +125,7 @@ interface PendingRepair {
   readonly patchDigest: string;
   readonly sourcePath: string;
   readonly snapshotExecutionFingerprint: string;
-  state: "pending" | "approving" | "approved" | "failed";
+  state: "pending" | "approving" | "approved" | "failed" | "rejected";
 }
 
 function portableParts(value: string): string[] {
@@ -361,6 +362,7 @@ async function allocateRunnerOutput(
 export class RepairCoordinator {
   readonly #options: RepairCoordinatorOptions;
   readonly #repairs = new Map<string, PendingRepair>();
+  readonly #activeRepairByRun = new Map<string, string>();
   constructor(options: RepairCoordinatorOptions) {
     validateToolPath(options.toolPath);
     if (options.trialCoordinationDomain.length === 0
@@ -481,6 +483,9 @@ export class RepairCoordinator {
     };
     await verifySnapshot(snapshot, originalModes);
     await this.#options.runStore.writeRecord(runId, "repair.json", { schema: "arena.repair/v1", repair_id: repairId, run_id: runId, status: "pending", snapshot_hash: baseline.snapshot_hash, created_at: createdAt, changed_paths: changedPaths, patch_ref: artifact.ref });
+    const previousId = this.#activeRepairByRun.get(runId);
+    const previous = previousId === undefined ? undefined : this.#repairs.get(previousId);
+    if (previous?.state === "pending") previous.state = "rejected";
     this.#repairs.set(repairId, {
       proposal, baseline, manifestId: context.manifest_id, originalModes,
       ownedDirectory, ownedSource,
@@ -492,12 +497,15 @@ export class RepairCoordinator {
       snapshotExecutionFingerprint: validatedSnapshot.execution_fingerprint,
       state: "pending"
     });
+    this.#activeRepairByRun.set(runId, repairId);
     return proposal;
   }
 
   async readCandidatePatch(repairId: string): Promise<CandidatePatch> {
     const repair = this.#repairs.get(repairId);
-    if (repair === undefined || repair.proposal.repair_id !== repairId) {
+    if (repair === undefined || repair.proposal.repair_id !== repairId
+      || repair.state !== "pending"
+      || this.#activeRepairByRun.get(repair.proposal.run_id) !== repairId) {
       throw new Error("Candidate patch is unavailable");
     }
     const record = await this.#options.artifactStore.stat(repair.proposal.patch_ref);
@@ -519,6 +527,7 @@ export class RepairCoordinator {
     }
     return {
       repair_id: repairId,
+      patch_ref: repair.proposal.patch_ref,
       mime: "text/x-diff",
       bytes: record.bytes,
       redacted: false,
@@ -527,9 +536,28 @@ export class RepairCoordinator {
     };
   }
 
+  async rejectRepair(repairId: string): Promise<void> {
+    const repair = this.#repairs.get(repairId);
+    if (repair?.state !== "pending"
+      || this.#activeRepairByRun.get(repair.proposal.run_id) !== repairId) {
+      throw new Error(`Repair is not pending: ${repairId}`);
+    }
+    await this.#options.runStore.writeRecord(repair.baseline.run_id, "repair.json", {
+      schema: "arena.repair/v1", repair_id: repair.proposal.repair_id,
+      run_id: repair.proposal.run_id, status: "rejected",
+      snapshot_hash: repair.proposal.snapshot_hash, created_at: repair.proposal.created_at,
+      changed_paths: repair.proposal.changed_paths, patch_ref: repair.proposal.patch_ref,
+      reason: { code: "USER_REJECTED" }
+    });
+    repair.state = "rejected";
+  }
+
   async approveAndRerun(repairId: string): Promise<RunEnvelope> {
     const repair = this.#repairs.get(repairId);
-    if (repair?.state !== "pending") throw new Error(`Repair is not pending: ${repairId}`);
+    if (repair?.state !== "pending"
+      || this.#activeRepairByRun.get(repair.proposal.run_id) !== repairId) {
+      throw new Error(`Repair is not pending: ${repairId}`);
+    }
     repair.state = "approving";
     try {
       const directory = await lstat(repair.ownedDirectory.path);
@@ -635,6 +663,7 @@ export class RepairCoordinator {
         run_id: repair.proposal.run_id, status: "approved",
         snapshot_hash: repair.proposal.snapshot_hash, created_at: repair.proposal.created_at,
         changed_paths: repair.proposal.changed_paths, patch_ref: repair.proposal.patch_ref,
+        reviewed_patch_ref: repair.proposal.patch_ref,
         child_run_id: child.run_id, new_snapshot_hash: repaired.source_hash
       });
       repair.state = "approved";

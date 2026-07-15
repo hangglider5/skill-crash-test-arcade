@@ -526,6 +526,27 @@ describe("RepairCoordinator", () => {
     expect(JSON.stringify(record)).not.toContain(fixture.root);
   });
 
+  it("persists an explicit rejection as a terminal review decision", async () => {
+    const fixture = await repairFixture(async (cwd) => {
+      await writeFile(path.join(cwd, "SKILL.md"), "# Reviewed repair\n");
+    });
+    const proposal = await fixture.coordinator.createRepairFork("run_baseline");
+
+    await fixture.coordinator.rejectRepair(proposal.repair_id);
+
+    expect(JSON.parse(await readFile(
+      path.join(fixture.root, "runs", "run_baseline", "repair.json"), "utf8"
+    ))).toMatchObject({
+      repair_id: proposal.repair_id,
+      status: "rejected",
+      reason: { code: "USER_REJECTED" }
+    });
+    await expect(fixture.coordinator.readCandidatePatch(proposal.repair_id))
+      .rejects.toThrow("Candidate patch is unavailable");
+    await expect(fixture.coordinator.approveAndRerun(proposal.repair_id))
+      .rejects.toThrow("Repair is not pending");
+  });
+
   it("returns a stable domain error when the repair directory disappears", async () => {
     const fixture = await repairFixture(async (cwd) => {
       await writeFile(path.join(cwd, "SKILL.md"), "# Reviewed repair\n");
@@ -557,20 +578,22 @@ describe("RepairCoordinator", () => {
     });
   });
 
-  it("allocates distinct trials for concurrent approvals of the same repaired snapshot", async () => {
+  it("supersedes an older candidate and approves only the active repair for a run", async () => {
     const fixture = await repairFixture(async (cwd) => {
       await writeFile(path.join(cwd, "SKILL.md"), "# Stable repaired Skill\n");
     }, { fixedRepairedSnapshot: true });
     const first = await fixture.coordinator.createRepairFork("run_baseline");
     const second = await fixture.coordinator.createRepairFork("run_baseline");
 
-    await Promise.all([
-      fixture.coordinator.approveAndRerun(first.repair_id),
-      fixture.coordinator.approveAndRerun(second.repair_id)
-    ]);
+    await expect(fixture.coordinator.readCandidatePatch(first.repair_id))
+      .rejects.toThrow("Candidate patch is unavailable");
+    await expect(fixture.coordinator.rejectRepair(first.repair_id))
+      .rejects.toThrow("Repair is not pending");
+    await expect(fixture.coordinator.approveAndRerun(first.repair_id))
+      .rejects.toThrow("Repair is not pending");
+    await fixture.coordinator.approveAndRerun(second.repair_id);
 
-    expect(fixture.childRequests.map(({ trial_index }) => trial_index).sort())
-      .toEqual([0, 1]);
+    expect(fixture.childRequests.map(({ trial_index }) => trial_index)).toEqual([0]);
     expect(new Set(fixture.childRequests.map(({ snapshot_hash }) => snapshot_hash)).size)
       .toBe(1);
     const expectedFingerprint = computeSnapshotExecutionFingerprint(

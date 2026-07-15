@@ -171,7 +171,7 @@ function reportResult(report: ArenaReport): LockedResultView {
     run: report.run,
     verdict: report.verdict,
     redaction_complete: report.redaction_complete,
-    failure_chain: report.verdict.verifier_results
+    failed_verifier_evidence: report.verdict.verifier_results
       .filter(({ passed }) => !passed)
       .slice(0, 8)
       .map((verifier) => ({
@@ -191,6 +191,20 @@ function repairedComparisonIsLocked(baseline: ArenaReport, child: RunEnvelope): 
     && child.runner.model === baseline.run.runner.model;
 }
 
+export function approvedChildReportMatches(
+  baseline: ArenaReport,
+  child: ArenaReport
+): boolean {
+  const repair = baseline.repair;
+  return repair?.status === "approved"
+    && repair.run_id === baseline.run.run_id
+    && repair.snapshot_hash === baseline.run.snapshot_hash
+    && repair.reviewed_patch_ref === repair.patch_ref
+    && repair.child_run_id === child.run.run_id
+    && repair.new_snapshot_hash === child.run.snapshot_hash
+    && repairedComparisonIsLocked(baseline, child.run);
+}
+
 export function VerdictSession(props: {
   readonly api: ArenaApi;
   readonly initialBaseline: ArenaReport;
@@ -200,7 +214,6 @@ export function VerdictSession(props: {
 }): React.JSX.Element {
   const [baseline, setBaseline] = useState(props.initialBaseline);
   const [candidatePatch, setCandidatePatch] = useState<CandidatePatch | null>(null);
-  const [rejectedRepairId, setRejectedRepairId] = useState<string | null>(null);
   const [selectedEvidence, setSelectedEvidence] = useState<EvidenceRef | null>(null);
   const mountedRef = useRef(true);
   const generationRef = useRef(0);
@@ -210,7 +223,6 @@ export function VerdictSession(props: {
     generationRef.current += 1;
     setBaseline(props.initialBaseline);
     setCandidatePatch(null);
-    setRejectedRepairId(null);
     setSelectedEvidence(null);
     return () => {
       mountedRef.current = false;
@@ -254,13 +266,13 @@ export function VerdictSession(props: {
       props.api.report(runId)
     ]);
     if (patch.repair_id !== proposal.repair_id
+      || patch.patch_ref !== proposal.patch_ref
       || next.run.run_id !== runId
       || next.repair?.repair_id !== proposal.repair_id) {
       throw new Error("Repair review membership drifted");
     }
     if (generationIsCurrent(generation, runId)) {
       setCandidatePatch(patch);
-      setRejectedRepairId(null);
       updateBaseline(next);
     }
   };
@@ -276,10 +288,43 @@ export function VerdictSession(props: {
     if (!repairedComparisonIsLocked(baseline, child)) {
       throw new Error("Repaired child lineage drifted");
     }
-    if (generationIsCurrent(generation, runId)) props.onChildRunStarted(child);
+    const next = await props.api.report(runId);
+    const approved = next.repair;
+    if (approved?.status !== "approved"
+      || approved.repair_id !== repair.repair_id
+      || approved.patch_ref !== repair.patch_ref
+      || approved.reviewed_patch_ref !== candidatePatch.patch_ref
+      || approved.child_run_id !== child.run_id
+      || approved.new_snapshot_hash !== child.snapshot_hash) {
+      throw new Error("Approved repair proof drifted");
+    }
+    if (generationIsCurrent(generation, runId)) {
+      updateBaseline(next);
+      props.onChildRunStarted(child);
+    }
+  };
+  const rejectRepair = async (): Promise<void> => {
+    const repair = baseline.repair;
+    if (repair?.status !== "pending") throw new Error("A pending repair is required");
+    const runId = baseline.run.run_id;
+    const generation = generationRef.current;
+    const rejected = await props.api.rejectRepair(repair.repair_id);
+    if (rejected.status !== "rejected" || rejected.repair_id !== repair.repair_id
+      || rejected.run_id !== runId || rejected.patch_ref !== repair.patch_ref) {
+      throw new Error("Rejected repair proof drifted");
+    }
+    const next = await refreshBaseline(generation, runId);
+    if (next.repair?.status !== "rejected"
+      || next.repair.repair_id !== repair.repair_id) {
+      throw new Error("Rejected repair was not persisted");
+    }
+    if (generationIsCurrent(generation, runId)) setCandidatePatch(null);
   };
   const exportReport = async (): Promise<void> => {
-    if (baseline.redaction_complete !== true) throw new Error("Report export is blocked");
+    if (baseline.redaction_complete !== true || props.child === undefined
+      || !approvedChildReportMatches(baseline, props.child)) {
+      throw new Error("Report export is blocked");
+    }
     const blob = new Blob([JSON.stringify(baseline, null, 2)], { type: "application/json" });
     const url = URL.createObjectURL(blob);
     try {
@@ -293,7 +338,8 @@ export function VerdictSession(props: {
   };
 
   const visibleRepair = baseline.repair === undefined
-    || baseline.repair.repair_id === rejectedRepairId
+    || baseline.repair.status === "rejected"
+    || baseline.repair.status === "failed"
     ? undefined
     : {
       proposal: baseline.repair,
@@ -313,10 +359,7 @@ export function VerdictSession(props: {
         onDiagnose={diagnose}
         onEvidenceSelect={setSelectedEvidence}
         onExportReport={exportReport}
-        onReject={() => {
-          if (baseline.repair !== undefined) setRejectedRepairId(baseline.repair.repair_id);
-          setCandidatePatch(null);
-        }}
+        onReject={rejectRepair}
       />
       {selectedEvidence === null ? null : (
         <p aria-live="polite" className="selected-evidence">Selected evidence: <code>{selectedEvidence}</code></p>
@@ -364,9 +407,9 @@ export function App(): React.JSX.Element {
   }
 
   function handleReport(next: ArenaReport): void {
-    if (baselineReport !== null && next.run.parent_run_id === baselineReport.run.run_id) {
+    if (baselineReport !== null && approvedChildReportMatches(baselineReport, next)) {
       setChildReport(next);
-    } else {
+    } else if (baselineReport === null || next.run.run_id === baselineReport.run.run_id) {
       setBaselineReport(next);
       setChildReport(null);
     }

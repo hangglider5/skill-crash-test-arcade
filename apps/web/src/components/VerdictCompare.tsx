@@ -10,6 +10,7 @@ import type {
   EvidenceRef,
   RunEnvelope
 } from "../../../../src/protocol/schema.js";
+import { isLockedTerminalResult } from "../../../../src/protocol/schema.js";
 
 const MAX_CHANGED_PATHS = 24;
 const MAX_PATCH_PREVIEW_CHARS = 32_768;
@@ -22,7 +23,7 @@ const DIMENSION_LABELS: Readonly<Record<string, string>> = {
   recovery_discipline: "Recovery discipline"
 };
 
-export interface FailureChainItem {
+export interface FailedVerifierEvidenceItem {
   readonly label: string;
   readonly evidence_refs: readonly EvidenceRef[];
 }
@@ -31,7 +32,7 @@ export interface LockedResultView {
   readonly run: RunEnvelope;
   readonly verdict: SanitizedVerdict;
   readonly redaction_complete: boolean | undefined;
-  readonly failure_chain: readonly FailureChainItem[];
+  readonly failed_verifier_evidence: readonly FailedVerifierEvidenceItem[];
 }
 
 export interface CandidateRepairView {
@@ -46,13 +47,13 @@ export interface VerdictCompareProps {
   readonly child?: LockedResultView;
   readonly onDiagnose: () => Promise<void>;
   readonly onCreateRepair: () => Promise<void>;
-  readonly onReject: () => void;
+  readonly onReject: () => Promise<void>;
   readonly onApproveRerun: () => Promise<void>;
   readonly onExportReport: () => Promise<void>;
   readonly onEvidenceSelect?: ((ref: EvidenceRef) => void) | undefined;
 }
 
-type ActionName = "diagnose" | "repair" | "rerun" | "export";
+type ActionName = "diagnose" | "repair" | "reject" | "rerun" | "export";
 
 function evidenceLabel(ref: EvidenceRef): string {
   return ref.startsWith("event:") ? ref : `artifact:${ref.slice(-8)}`;
@@ -111,32 +112,68 @@ function proofItems(baseline: RunEnvelope, child: RunEnvelope): readonly ProofIt
 }
 
 function terminalLocked(result: LockedResultView): boolean {
-  return (result.run.state === "completed" || result.run.state === "errored")
-    && result.run.ended_at !== undefined
-    && result.verdict.run_id === result.run.run_id;
+  return isLockedTerminalResult(result.run, result.verdict);
+}
+
+function comparisonProofItems(
+  baseline: LockedResultView,
+  child: LockedResultView,
+  repair: CandidateRepairView | undefined
+): readonly ProofItem[] {
+  const proposal = repair?.proposal;
+  const approved = proposal?.status === "approved" ? proposal : undefined;
+  return [
+    ...proofItems(baseline.run, child.run),
+    {
+      label: "Baseline verdict membership",
+      ok: terminalLocked(baseline),
+      mismatch: "Baseline result is not terminal and membership-locked"
+    },
+    {
+      label: "Child verdict membership",
+      ok: terminalLocked(child),
+      mismatch: "Child result is not terminal and membership-locked"
+    },
+    {
+      label: "Approved repair",
+      ok: approved !== undefined,
+      mismatch: "Repair is not approved"
+    },
+    {
+      label: "Reviewed patch membership",
+      ok: approved !== undefined
+        && approved.run_id === baseline.run.run_id
+        && approved.snapshot_hash === baseline.run.snapshot_hash
+        && approved.reviewed_patch_ref === approved.patch_ref,
+      mismatch: "Reviewed patch does not match the approved repair"
+    },
+    {
+      label: "Approved child membership",
+      ok: approved !== undefined
+        && approved.child_run_id === child.run.run_id
+        && approved.new_snapshot_hash === child.run.snapshot_hash,
+      mismatch: "Child does not match the approved repair"
+    }
+  ];
+}
+
+function comparisonIsControlled(
+  baseline: LockedResultView,
+  child: LockedResultView | undefined,
+  repair: CandidateRepairView | undefined
+): boolean {
+  return child !== undefined && comparisonProofItems(baseline, child, repair).every(({ ok }) => ok);
 }
 
 function ComparisonProof(props: {
   readonly baseline: LockedResultView;
   readonly child?: LockedResultView;
+  readonly repair?: CandidateRepairView;
 }): React.JSX.Element {
   if (props.child === undefined) {
     return <p className="compare-pending">No repaired child run yet.</p>;
   }
-  const proof = proofItems(props.baseline.run, props.child.run);
-  const membershipProof: ProofItem[] = [
-    {
-      label: "Baseline verdict membership",
-      ok: terminalLocked(props.baseline),
-      mismatch: "Baseline result is not terminal and membership-locked"
-    },
-    {
-      label: "Child verdict membership",
-      ok: terminalLocked(props.child),
-      mismatch: "Child result is not terminal and membership-locked"
-    }
-  ];
-  const allProof = [...proof, ...membershipProof];
+  const allProof = comparisonProofItems(props.baseline, props.child, props.repair);
   const comparable = allProof.every(({ ok }) => ok);
   const observedImprovement = comparable
     && props.baseline.verdict.status === "defeat"
@@ -166,7 +203,8 @@ function repairMatchesBaseline(
 ): boolean {
   return repair.proposal.run_id === baseline.run.run_id
     && repair.proposal.snapshot_hash === baseline.run.snapshot_hash
-    && (repair.patch === undefined || repair.patch.repair_id === repair.proposal.repair_id);
+    && (repair.patch === undefined || (repair.patch.repair_id === repair.proposal.repair_id
+      && repair.patch.patch_ref === repair.proposal.patch_ref));
 }
 
 export function VerdictCompare(props: VerdictCompareProps): React.JSX.Element {
@@ -209,6 +247,19 @@ export function VerdictCompare(props: VerdictCompareProps): React.JSX.Element {
 
   const { baseline } = props;
   const verdict = baseline.verdict;
+  if (!terminalLocked(baseline)) {
+    return (
+      <section aria-labelledby="verdict-title" className="verdict-compare verdict-invalid">
+        <header className="verdict-hero">
+          <div>
+            <p className="advisory-label">UNVERIFIED RESULT</p>
+            <h1 id="verdict-title">Result unavailable</h1>
+            <p>The run and verdict do not form a valid terminal result.</p>
+          </div>
+        </header>
+      </section>
+    );
+  }
   const diagnosis = props.diagnosis?.run_id === baseline.run.run_id ? props.diagnosis : undefined;
   const repair = props.repair !== undefined && repairMatchesBaseline(props.repair, baseline)
     ? props.repair
@@ -216,7 +267,8 @@ export function VerdictCompare(props: VerdictCompareProps): React.JSX.Element {
   const paths = repair?.proposal.changed_paths.slice(0, MAX_CHANGED_PATHS) ?? [];
   const patchText = repair?.patch?.text ?? "";
   const patchTruncated = patchText.length > MAX_PATCH_PREVIEW_CHARS;
-  const exportBlocked = baseline.redaction_complete !== true;
+  const controlledComparison = comparisonIsControlled(baseline, props.child, repair);
+  const exportBlocked = baseline.redaction_complete !== true || !controlledComparison;
 
   return (
     <section aria-labelledby="verdict-title" className={`verdict-compare verdict-${verdict.status}`}>
@@ -267,12 +319,12 @@ export function VerdictCompare(props: VerdictCompareProps): React.JSX.Element {
           </section>
 
           <section className="result-section failure-chain-section">
-            <h2>First consequential failure chain</h2>
-            {baseline.failure_chain.length === 0 ? (
-              <p>No explicit consequential failure chain was supplied.</p>
+            <h2>Failed verifier evidence</h2>
+            {baseline.failed_verifier_evidence.length === 0 ? (
+              <p>No failed verifier evidence was supplied.</p>
             ) : (
               <ol className="failure-chain">
-                {baseline.failure_chain.slice(0, 8).map((item, index) => (
+                {baseline.failed_verifier_evidence.slice(0, 8).map((item, index) => (
                   <li key={`${index}-${item.label}`}>
                     <span>{item.label}</span>
                     <EvidenceLinks refs={item.evidence_refs} onSelect={props.onEvidenceSelect} />
@@ -344,7 +396,14 @@ export function VerdictCompare(props: VerdictCompareProps): React.JSX.Element {
                   </div>
                 )}
                 <div className="repair-actions">
-                  <button className="secondary-action" disabled={busy !== null} onClick={props.onReject} type="button">Reject</button>
+                  <button
+                    className="secondary-action"
+                    disabled={busy !== null || repair.proposal.status !== "pending"}
+                    onClick={() => void runAction("reject", props.onReject)}
+                    type="button"
+                  >
+                    {busy === "reject" ? "Rejecting…" : "Reject"}
+                  </button>
                   <button
                     className="repair-action"
                     disabled={busy !== null || repair.patch === undefined || repair.proposal.status !== "pending"}
@@ -360,7 +419,11 @@ export function VerdictCompare(props: VerdictCompareProps): React.JSX.Element {
 
           <section className="result-section comparison-section">
             <h2>Baseline / repaired proof</h2>
-            <ComparisonProof baseline={baseline} {...(props.child === undefined ? {} : { child: props.child })} />
+            <ComparisonProof
+              baseline={baseline}
+              {...(props.child === undefined ? {} : { child: props.child })}
+              {...(repair === undefined ? {} : { repair })}
+            />
           </section>
 
           <section className="export-section">
@@ -375,7 +438,9 @@ export function VerdictCompare(props: VerdictCompareProps): React.JSX.Element {
             {baseline.redaction_complete === undefined
               ? <p>Export blocked: redaction completeness is unknown.</p>
               : baseline.redaction_complete
-                ? <p>Sanitized report is ready for export.</p>
+                ? controlledComparison
+                  ? <p>Sanitized controlled comparison is ready for export.</p>
+                  : <p>Export blocked: approved repair comparison proof is incomplete.</p>
                 : <p>Export blocked: redaction is incomplete.</p>}
           </section>
         </aside>

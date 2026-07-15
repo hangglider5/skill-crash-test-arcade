@@ -5,6 +5,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 
 import {
   App,
+  approvedChildReportMatches,
   RunSession,
   VerdictSession,
   type ActiveRunContext
@@ -124,7 +125,7 @@ function runRecord(): Record<string, unknown> {
   };
 }
 
-function sanitizedRepair(status: "pending" | "approved" | "failed"): Record<string, unknown> {
+function sanitizedRepair(status: "pending" | "approved" | "failed" | "rejected"): Record<string, unknown> {
   const base = {
     schema: "arena.repair/v1",
     repair_id: "repair/01",
@@ -136,10 +137,18 @@ function sanitizedRepair(status: "pending" | "approved" | "failed"): Record<stri
     patch_ref: `sha256:${hash}`
   };
   if (status === "approved") {
-    return { ...base, child_run_id: "run_child", new_snapshot_hash: hashB };
+    return {
+      ...base,
+      child_run_id: "run_child",
+      new_snapshot_hash: hashB,
+      reviewed_patch_ref: `sha256:${hash}`
+    };
   }
   if (status === "failed") {
     return { ...base, error: { code: "REPAIR_APPROVAL_FAILED" } };
+  }
+  if (status === "rejected") {
+    return { ...base, reason: { code: "USER_REJECTED" } };
   }
   return base;
 }
@@ -161,7 +170,9 @@ function sanitizedReport(options: {
   return {
     schema: "arena.report/v1",
     redaction_complete: true,
-    run: runRecord(),
+    run: options.errorVerdict
+      ? { ...runRecord(), state: "errored" }
+      : runRecord(),
     manifest_id: "repo-dirty-tree-v1",
     snapshot: {
       schema: "arena.skill-snapshot/v1",
@@ -254,6 +265,27 @@ afterEach(() => {
 });
 
 describe("App", () => {
+  it("classifies only the exact child named by the active approved repair", () => {
+    const baseline = ArenaReportSchema.parse(sanitizedReport({
+      repair: sanitizedRepair("approved")
+    }));
+    const childRun: RunEnvelope = {
+      ...baseline.run,
+      run_id: "run_child",
+      parent_run_id: baseline.run.run_id,
+      snapshot_hash: hashB
+    };
+    const childReport = lobbyReport(childRun, []);
+
+    expect(approvedChildReportMatches(baseline, childReport)).toBe(true);
+    expect(approvedChildReportMatches({
+      ...baseline,
+      repair: baseline.repair?.status === "approved"
+        ? { ...baseline.repair, child_run_id: "run_other" }
+        : baseline.repair
+    }, childReport)).toBe(false);
+  });
+
   it("keeps diagnosis, repair, and rerun explicit in the verdict session", async () => {
     const user = userEvent.setup();
     const initialValue = sanitizedReport();
@@ -262,6 +294,9 @@ describe("App", () => {
     const diagnosed = ArenaReportSchema.parse(sanitizedReport());
     const repaired = ArenaReportSchema.parse(sanitizedReport({
       repair: sanitizedRepair("pending")
+    }));
+    const approved = ArenaReportSchema.parse(sanitizedReport({
+      repair: sanitizedRepair("approved")
     }));
     const patchText = "diff --git a/SKILL.md b/SKILL.md\n";
     const child: RunEnvelope = {
@@ -286,6 +321,7 @@ describe("App", () => {
       }),
       candidatePatch: vi.fn().mockResolvedValue({
         repair_id: "repair/01",
+        patch_ref: `sha256:${hash}`,
         mime: "text/x-diff",
         bytes: new TextEncoder().encode(patchText).byteLength,
         redacted: false,
@@ -296,12 +332,15 @@ describe("App", () => {
       report: vi.fn()
         .mockResolvedValueOnce(diagnosed)
         .mockResolvedValueOnce(repaired)
+        .mockResolvedValueOnce(approved)
     } as unknown as ArenaApi;
     const onChildRunStarted = vi.fn();
+    const onBaselineUpdated = vi.fn();
     render(
       <VerdictSession
         api={api}
         initialBaseline={initial}
+        onBaselineUpdated={onBaselineUpdated}
         onChildRunStarted={onChildRunStarted}
       />
     );
@@ -322,7 +361,37 @@ describe("App", () => {
 
     await user.click(screen.getByRole("button", { name: "Approve & Rerun" }));
     expect(api.rerun).toHaveBeenCalledWith("repair/01");
+    expect(api.report).toHaveBeenLastCalledWith("run/01");
+    expect(api.report).toHaveBeenCalledTimes(3);
+    expect(onBaselineUpdated).toHaveBeenLastCalledWith(approved);
     expect(onChildRunStarted).toHaveBeenCalledWith(child);
+  });
+
+  it("persists rejection through the server before hiding a candidate", async () => {
+    const user = userEvent.setup();
+    const pending = ArenaReportSchema.parse(sanitizedReport({
+      repair: sanitizedRepair("pending")
+    }));
+    const rejected = ArenaReportSchema.parse(sanitizedReport({
+      repair: sanitizedRepair("rejected")
+    }));
+    const patchText = "diff --git a/SKILL.md b/SKILL.md\n";
+    const api = {
+      rejectRepair: vi.fn().mockResolvedValue(sanitizedRepair("rejected")),
+      report: vi.fn().mockResolvedValue(rejected)
+    } as unknown as ArenaApi;
+    render(
+      <VerdictSession api={api} initialBaseline={pending} onChildRunStarted={vi.fn()} />
+    );
+
+    await user.click(screen.getByRole("button", { name: "Reject" }));
+
+    expect(api.rejectRepair).toHaveBeenCalledWith("repair/01");
+    expect(api.report).toHaveBeenCalledWith("run/01");
+    await waitFor(() => {
+      expect(screen.queryByText(patchText, { exact: false })).not.toBeInTheDocument();
+    });
+    expect(screen.queryByRole("button", { name: "Approve & Rerun" })).not.toBeInTheDocument();
   });
 
   it("atomically remounts a keyed run session when run context changes", async () => {

@@ -104,6 +104,19 @@ export const RunEnvelopeSchema = z.object({
   ended_at: z.string().datetime().optional()
 }).strict();
 
+export function isLockedTerminalResult(
+  run: Pick<z.infer<typeof RunEnvelopeSchema>, "run_id" | "state" | "ended_at">,
+  verdict: Pick<z.infer<typeof VerdictBundleSchema>, "run_id" | "status" | "hard_gate_failures">
+): boolean {
+  if (run.ended_at === undefined || verdict.run_id !== run.run_id) return false;
+  if (run.state === "completed" && verdict.status !== "victory" && verdict.status !== "defeat") {
+    return false;
+  }
+  if (run.state === "errored" && verdict.status !== "error") return false;
+  if (run.state !== "completed" && run.state !== "errored") return false;
+  return verdict.status !== "victory" || verdict.hard_gate_failures.length === 0;
+}
+
 export const FileRecordSchema = z.object({
   path: z.string().min(1),
   bytes: z.number().int().nonnegative(),

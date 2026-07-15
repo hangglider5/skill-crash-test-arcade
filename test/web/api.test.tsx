@@ -100,11 +100,48 @@ describe("Arena report artifact metadata", () => {
   });
 });
 
+describe("Arena report locked-result invariants", () => {
+  it.each([
+    ["running victory", "running", "victory", []],
+    ["errored victory", "errored", "victory", []],
+    ["victory with hard-gate failures", "completed", "victory", ["gate_01"]]
+  ])("rejects %s", async (_label, state, status, hardGateFailures) => {
+    const report = terminalReport(metadata());
+    report.run = { ...(report.run as object), state };
+    report.verdict = {
+      ...(report.verdict as object),
+      status,
+      score: 91,
+      hard_gate_failures: hardGateFailures
+    };
+
+    await expect(apiFor(report).report("run_01"))
+      .rejects.toMatchObject({ code: "INVALID_RESPONSE" });
+  });
+
+  it("accepts an ended errored run with an error verdict", async () => {
+    const report = terminalReport(metadata());
+    report.run = { ...(report.run as object), state: "errored" };
+    report.verdict = {
+      ...(report.verdict as object),
+      status: "error",
+      error: { code: "VERIFIER_CRASH" }
+    };
+    delete (report.verdict as Record<string, unknown>).score;
+
+    await expect(apiFor(report).report("run_01")).resolves.toMatchObject({
+      run: { state: "errored" },
+      verdict: { status: "error" }
+    });
+  });
+});
+
 describe("Candidate patch API", () => {
   it("parses only bounded authenticated local-review patches", async () => {
     const text = "diff --git a/SKILL.md b/SKILL.md\n";
     const fetchMock = vi.fn<typeof fetch>().mockResolvedValue(new Response(JSON.stringify({
       repair_id: "repair/01",
+      patch_ref: artifactRef,
       mime: "text/x-diff",
       bytes: new TextEncoder().encode(text).byteLength,
       redacted: false,
@@ -134,6 +171,7 @@ describe("Candidate patch API", () => {
     const text = "diff --git a b\n";
     await expect(apiFor({
       repair_id: "repair_01",
+      patch_ref: artifactRef,
       mime: "text/x-diff",
       bytes: new TextEncoder().encode(text).byteLength,
       redacted: false,
@@ -141,5 +179,30 @@ describe("Candidate patch API", () => {
       text,
       ...override
     }).candidatePatch("repair_01")).rejects.toMatchObject({ code: "INVALID_RESPONSE" });
+  });
+});
+
+describe("Repair review API", () => {
+  it("posts an exact rejection and parses only the terminal rejected repair", async () => {
+    const payload = {
+      schema: "arena.repair/v1",
+      repair_id: "repair/01",
+      run_id: "run_01",
+      status: "rejected",
+      snapshot_hash: hashA,
+      created_at: "2026-07-15T00:02:00.000Z",
+      changed_paths: ["SKILL.md"],
+      patch_ref: artifactRef,
+      reason: { code: "USER_REJECTED" }
+    };
+    const fetchMock = vi.fn<typeof fetch>().mockResolvedValue(new Response(JSON.stringify(payload), {
+      status: 200,
+      headers: { "content-type": "application/json" }
+    }));
+    const api = new ArenaApi("session-token", { fetch: fetchMock });
+
+    await expect(api.rejectRepair("repair/01")).resolves.toEqual(payload);
+    expect(String(fetchMock.mock.calls[0]![0])).toBe("/api/repairs/repair%2F01/reject");
+    expect(fetchMock.mock.calls[0]![1]?.method).toBe("POST");
   });
 });

@@ -51,46 +51,74 @@ interface CliOptions {
 }
 
 export function createProcessRepairRegistry(
-  coordinator: Pick<RepairCoordinator, "createRepairFork" | "readCandidatePatch" | "approveAndRerun">
+  coordinator: Pick<RepairCoordinator, "createRepairFork" | "readCandidatePatch" | "rejectRepair" | "approveAndRerun">
 ): Pick<ServerDependencies, "repairs" | "loadRepair"> {
-  const records = new Map<string, unknown>();
-  const owners = new Map<string, string>();
+  const records = new Map<string, Record<string, unknown>>();
+  const activeByRun = new Map<string, string>();
+  const activeRecord = (repairId: string): { runId: string; record: Record<string, unknown> } => {
+    const record = records.get(repairId);
+    const runId = typeof record?.run_id === "string" ? record.run_id : undefined;
+    if (record === undefined || runId === undefined || activeByRun.get(runId) !== repairId) {
+      throw new Error(`Repair is not active: ${repairId}`);
+    }
+    return { runId, record };
+  };
   return {
     repairs: {
       async createRepairFork(runId) {
         const value = await coordinator.createRepairFork(runId);
-        records.set(runId, { schema: "arena.repair/v1", ...value });
-        owners.set(value.repair_id, runId);
+        if (value.run_id !== runId) throw new Error("Repair membership drifted");
+        const previousId = activeByRun.get(runId);
+        const previous = previousId === undefined ? undefined : records.get(previousId);
+        if (previous !== undefined && previous.status === "pending") {
+          records.set(previousId!, {
+            ...previous,
+            status: "rejected",
+            reason: { code: "SUPERSEDED" }
+          });
+        }
+        records.set(value.repair_id, { schema: "arena.repair/v1", ...value });
+        activeByRun.set(runId, value.repair_id);
         return value;
       },
       async readCandidatePatch(repairId) {
-        if (!owners.has(repairId)) throw new Error("Candidate patch is unavailable");
+        const { record } = activeRecord(repairId);
+        if (record.status !== "pending") throw new Error("Candidate patch is unavailable");
         const candidate = await coordinator.readCandidatePatch(repairId);
-        if (candidate.repair_id !== repairId) throw new Error("Candidate patch is unavailable");
+        if (candidate.repair_id !== repairId || candidate.patch_ref !== record.patch_ref) {
+          throw new Error("Candidate patch is unavailable");
+        }
         return candidate;
       },
+      async rejectRepair(repairId) {
+        const { record } = activeRecord(repairId);
+        if (record.status !== "pending") throw new Error(`Repair is not pending: ${repairId}`);
+        await coordinator.rejectRepair(repairId);
+        const rejected = { ...record, status: "rejected", reason: { code: "USER_REJECTED" } };
+        records.set(repairId, rejected);
+        return rejected;
+      },
       async approveAndRerun(repairId) {
-        const runId = owners.get(repairId);
-        const existing = runId === undefined ? undefined : records.get(runId);
-        if (runId === undefined || typeof existing !== "object" || existing === null
-          || (existing as { status?: unknown }).status !== "pending") {
+        const { record: existing } = activeRecord(repairId);
+        if (existing.status !== "pending") {
           throw new Error(`Repair is not pending: ${repairId}`);
         }
         try {
           const child = await coordinator.approveAndRerun(repairId);
           const { error: _error, child_run_id: _child, new_snapshot_hash: _snapshot, ...base }
             = existing as Record<string, unknown>;
-          records.set(runId, {
+          records.set(repairId, {
             ...base,
             status: "approved",
             child_run_id: child.run_id,
-            new_snapshot_hash: child.snapshot_hash
+            new_snapshot_hash: child.snapshot_hash,
+            reviewed_patch_ref: existing.patch_ref
           });
           return child;
         } catch (error) {
           const { error: _error, child_run_id: _child, new_snapshot_hash: _snapshot, ...base }
             = existing as Record<string, unknown>;
-          records.set(runId, {
+          records.set(repairId, {
             ...base,
             status: "failed",
             error: { code: "REPAIR_APPROVAL_FAILED" }
@@ -99,7 +127,10 @@ export function createProcessRepairRegistry(
         }
       }
     },
-    loadRepair: async (runId) => records.get(runId)
+    loadRepair: async (runId) => {
+      const repairId = activeByRun.get(runId);
+      return repairId === undefined ? undefined : records.get(repairId);
+    }
   };
 }
 
