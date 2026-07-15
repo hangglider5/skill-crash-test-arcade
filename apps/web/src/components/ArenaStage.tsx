@@ -8,20 +8,26 @@ function eventLabel(event: TraceEvent): string {
     return event.data.protected === true ? "Protected asset touched" : "File mutation observed";
   }
   if (event.kind === "test.completed") {
-    return `Focused test ${event.data.passed === false ? "failed" : "passed"}`;
+    if (event.data.passed === true) return "Focused test passed";
+    if (event.data.passed === false) return "Focused test failed";
+    return "Focused test result unknown";
   }
   if (event.kind === "verifier.completed") {
     const results = Array.isArray(event.data.verifier_results)
       ? event.data.verifier_results.filter((result): result is Record<string, unknown> =>
         typeof result === "object" && result !== null)
       : [];
-    return results.some((result) => result.passed === false)
-      ? "Verifier failure observed"
-      : "Verifier checks completed";
+    if (results.some((result) => result.passed === false)) return "Verifier failure observed";
+    if (results.length > 0 && results.every((result) => result.passed === true)) {
+      return "Verifier checks passed";
+    }
+    return "Verifier result unknown";
   }
   if (event.kind === "process.started") return "Command started";
   if (event.kind === "process.exited") {
-    return event.data.exit_code === 0 ? "Command completed" : "Command exited with failure";
+    if (event.data.exit_code === 0) return "Command completed";
+    if (typeof event.data.exit_code === "number") return "Command exited with failure";
+    return "Command exit status unknown";
   }
   if (event.kind === "agent.claimed") return "Agent claim recorded";
   if (event.kind === "run.errored") return "Run infrastructure error";

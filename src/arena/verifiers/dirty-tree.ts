@@ -62,9 +62,67 @@ function processArtifact(result: ProcessResult): Buffer {
   }, null, 2)}\n`);
 }
 
+function safeDiffPath(value: string, prefix: "a/" | "b/"): boolean {
+  if (!value.startsWith(prefix) || value.length > 242 || value.includes("\\")) return false;
+  const parts = value.slice(prefix.length).split("/");
+  return parts.length > 0 && parts.every((part) =>
+    part.length > 0
+    && part !== "."
+    && part !== ".."
+    && /^[A-Za-z0-9._@+-]+$/u.test(part)
+  );
+}
+
+/** Preserve structural diff evidence while removing every repository-content line. */
+export function redactUnifiedDiff(raw: string): Buffer {
+  const redacted = raw.split("\n").map((line) => {
+    if (line.startsWith("diff --git ")) {
+      const parts = line.split(" ");
+      return parts.length === 4
+        && safeDiffPath(parts[2]!, "a/")
+        && safeDiffPath(parts[3]!, "b/")
+        ? line
+        : "diff --git [REDACTED] [REDACTED]";
+    }
+    if (line.startsWith("--- ")) {
+      const candidate = line.slice(4);
+      return candidate === "/dev/null" || safeDiffPath(candidate, "a/")
+        ? line
+        : "--- [REDACTED]";
+    }
+    if (line.startsWith("+++ ")) {
+      const candidate = line.slice(4);
+      return candidate === "/dev/null" || safeDiffPath(candidate, "b/")
+        ? line
+        : "+++ [REDACTED]";
+    }
+    const hunk = /^@@ -(\d+(?:,\d+)?) \+(\d+(?:,\d+)?) @@/u.exec(line);
+    if (hunk !== null) return `@@ -${hunk[1]} +${hunk[2]} @@`;
+    if (/^(?:new file mode|deleted file mode|old mode|new mode) [0-7]{6}$/u.test(line)
+      || /^(?:similarity|dissimilarity) index (?:100|[0-9]{1,2})%$/u.test(line)) {
+      return line;
+    }
+    if (line === "\\ No newline at end of file" || line.length === 0) return line;
+    if (line.startsWith("+")) return "+[REDACTED]";
+    if (line.startsWith("-")) return "-[REDACTED]";
+    if (line.startsWith(" ")) return " [REDACTED]";
+    return "[REDACTED]";
+  });
+  return Buffer.from(redacted.join("\n"));
+}
+
 async function runAndStore(
   input: VerifyDirtyTreeInput,
-  argv: readonly [string, ...string[]]
+  argv: readonly [string, ...string[]],
+  artifact: {
+    readonly mime: string;
+    readonly redacted: boolean;
+    readonly bytes: (result: ProcessResult) => Uint8Array;
+  } = {
+    mime: "application/json",
+    redacted: false,
+    bytes: processArtifact
+  }
 ): Promise<StoredProcess> {
   const result = await runBoundedProcess({
     argv,
@@ -72,9 +130,9 @@ async function runAndStore(
     env: isolatedProcessEnvironment(input.workspace),
     timeout_ms: input.process_timeout_ms ?? DEFAULT_PROCESS_TIMEOUT_MS
   });
-  const record = await input.artifact_store.put(processArtifact(result), {
-    mime: "application/json",
-    redacted: false
+  const record = await input.artifact_store.put(artifact.bytes(result), {
+    mime: artifact.mime,
+    redacted: artifact.redacted
   });
   return { result, evidence: record.ref };
 }
@@ -82,9 +140,16 @@ async function runAndStore(
 async function runGitAndStore(
   input: VerifyDirtyTreeInput,
   argv: readonly [string, ...string[]],
-  evidence: ArtifactRef[]
+  evidence: ArtifactRef[],
+  artifact?: {
+    readonly mime: string;
+    readonly redacted: boolean;
+    readonly bytes: (result: ProcessResult) => Uint8Array;
+  }
 ): Promise<StoredProcess> {
-  const stored = await runAndStore(input, argv);
+  const stored = artifact === undefined
+    ? await runAndStore(input, argv)
+    : await runAndStore(input, argv, artifact);
   evidence.push(stored.evidence);
   if (stored.result.exit_code !== 0) {
     throw new ProcessExecutionError(
@@ -196,7 +261,11 @@ export async function verifyDirtyTree(
       "--binary",
       input.baseline.base_commit,
       "--"
-    ], evidence);
+    ], evidence, {
+      mime: "text/x-diff",
+      redacted: true,
+      bytes: (result) => redactUnifiedDiff(result.stdout)
+    });
 
     const nameStatus = await runGitAndStore(input, [
       ...GIT_PREFIX,

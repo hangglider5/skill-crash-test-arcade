@@ -27,6 +27,7 @@ export interface ReplayTimelineProps {
 }
 
 export function ReplayTimeline(props: ReplayTimelineProps): React.JSX.Element {
+  const positionId = "replay-position";
   const sequences = useMemo(
     () => props.events.map(({ seq }) => seq).toSorted((left, right) => left - right),
     [props.events]
@@ -90,8 +91,8 @@ export function ReplayTimeline(props: ReplayTimelineProps): React.JSX.Element {
           <h2 id="replay-title">Replay Timeline</h2>
           <p>Ordered by persisted sequence, never wall-clock time.</p>
         </div>
-        <output aria-live="polite">
-          Replay position <span aria-hidden="true">{sequences.length === 0 ? "—" : props.cursorSeq}</span>
+        <output aria-live="polite" id={positionId}>
+          Replay position {sequences.length === 0 ? "—" : `SEQ ${props.cursorSeq}`}
         </output>
       </header>
       <div className="replay-controls">
@@ -130,6 +131,7 @@ export function ReplayTimeline(props: ReplayTimelineProps): React.JSX.Element {
       <label className="replay-range">
         <span>Replay sequence</span>
         <input
+          aria-describedby={positionId}
           aria-label="Replay sequence"
           disabled={sequences.length === 0}
           max={last}

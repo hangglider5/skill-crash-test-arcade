@@ -91,6 +91,8 @@ function artifactSummaries(): ArtifactSummary[] {
       kind: "diff",
       label: "Protected file diff",
       summary: "docs/roadmap.md: one existing line replaced",
+      mime: "text/x-diff",
+      bytes: 120,
       redacted: true
     },
     {
@@ -98,6 +100,8 @@ function artifactSummaries(): ArtifactSummary[] {
       kind: "diff",
       label: "Unsafe raw diff",
       summary: "must never render",
+      mime: "text/x-diff",
+      bytes: 220,
       redacted: false
     }
   ];
@@ -182,6 +186,61 @@ describe("RunScreen", () => {
     expect(within(arena).queryByText(/58\/100|VICTORY/)).not.toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Protected asset touched" })).toBeVisible();
     expect(screen.getByRole("button", { name: "Focused test passed" })).toBeVisible();
+  });
+
+  it("uses neutral arena labels when test and process outcomes are absent", () => {
+    render(
+      <RunScreen
+        events={[
+          event(1, "verify", "test.completed", { test: "unknown" }),
+          event(2, "verify", "process.exited", { argv: ["pnpm", "test"] }),
+          event(3, "verify", "verifier.completed", { verifier_results: [{}] })
+        ]}
+        manifest={dirtyTreeReplayManifest()}
+        run={runningEnvelope()}
+      />
+    );
+
+    expect(screen.getByRole("button", { name: "Focused test result unknown" })).toBeVisible();
+    expect(screen.getByRole("button", { name: "Command exit status unknown" })).toBeVisible();
+    expect(screen.getByRole("button", { name: "Verifier result unknown" })).toBeVisible();
+    const arena = screen.getByRole("region", { name: "Trace Arena" });
+    expect(within(arena).queryByRole("button", { name: /test passed|failure observed|exited with failure/i }))
+      .not.toBeInTheDocument();
+  });
+
+  it("separates generic run risk from evidence-backed hard-gate risk", () => {
+    const { rerender } = render(
+      <RunScreen
+        events={[event(1, "verify", "test.completed", { passed: false })]}
+        manifest={dirtyTreeReplayManifest()}
+        run={runningEnvelope()}
+      />
+    );
+    expect(screen.getByText("Run at risk")).toBeVisible();
+    expect(screen.queryByText("Hard gate at risk")).not.toBeInTheDocument();
+
+    rerender(
+      <RunScreen
+        events={[event(1, "judge", "verifier.completed", {
+          verifier_results: [{ passed: false, hard_gate: false }]
+        })]}
+        manifest={dirtyTreeReplayManifest()}
+        run={runningEnvelope()}
+      />
+    );
+    expect(screen.getByText("Run at risk")).toBeVisible();
+
+    rerender(
+      <RunScreen
+        events={[event(1, "judge", "verifier.completed", {
+          verifier_results: [{ passed: false, hard_gate: true }]
+        })]}
+        manifest={dirtyTreeReplayManifest()}
+        run={runningEnvelope()}
+      />
+    );
+    expect(screen.getByText("Hard gate at risk")).toBeVisible();
   });
 
   it("filters every arena and evidence projection by replay sequence", () => {
@@ -269,7 +328,7 @@ describe("RunScreen", () => {
     for (const tab of screen.getAllByRole("tab")) {
       const controls = tab.getAttribute("aria-controls");
       expect(controls).not.toBeNull();
-      expect(document.getElementById(controls!)).not.toBeNull();
+      expect(document.getElementById(controls!)).toHaveAttribute("tabindex", "0");
     }
     evidenceTab.focus();
     fireEvent.keyDown(evidenceTab, { key: "ArrowRight" });
@@ -368,6 +427,151 @@ describe("RunScreen", () => {
     );
     expect(screen.getByRole("slider", { name: "Replay sequence" })).toHaveValue("8");
     expect(screen.getByRole("button", { name: "Play replay" })).toBeDisabled();
+  });
+
+  it("resets replay state on run identity changes and clamps sequence contractions", () => {
+    const firstRun = runningEnvelope();
+    const { rerender } = render(
+      <RunScreen
+        events={[event(1, "inspect", "run.started"), event(9, "patch", "phase.entered")]}
+        manifest={dirtyTreeReplayManifest()}
+        run={firstRun}
+      />
+    );
+    const slider = screen.getByRole("slider", { name: "Replay sequence" });
+    fireEvent.change(slider, { target: { value: "1" } });
+    expect(slider).toHaveValue("1");
+
+    const secondRun = { ...firstRun, run_id: "run_02", run_group_id: "group_02" };
+    rerender(
+      <RunScreen
+        events={[{ ...event(40, "judge", "run.finished"), run_id: "run_02" }]}
+        manifest={dirtyTreeReplayManifest()}
+        run={secondRun}
+      />
+    );
+    expect(screen.getByRole("slider", { name: "Replay sequence" })).toHaveValue("40");
+
+    rerender(
+      <RunScreen
+        events={[
+          { ...event(5, "verify", "test.completed", { passed: true }), run_id: "run_02" },
+          { ...event(40, "judge", "run.finished"), run_id: "run_02" }
+        ]}
+        manifest={dirtyTreeReplayManifest()}
+        run={secondRun}
+      />
+    );
+    fireEvent.change(screen.getByRole("slider", { name: "Replay sequence" }), {
+      target: { value: "5" }
+    });
+    rerender(
+      <RunScreen
+        events={[{ ...event(40, "judge", "run.finished"), run_id: "run_02" }]}
+        manifest={dirtyTreeReplayManifest()}
+        run={secondRun}
+      />
+    );
+    expect(screen.getByRole("slider", { name: "Replay sequence" })).toHaveValue("40");
+
+    rerender(
+      <RunScreen
+        events={[{ ...event(5, "verify", "test.completed", { passed: true }), run_id: "run_02" }]}
+        manifest={dirtyTreeReplayManifest()}
+        run={secondRun}
+      />
+    );
+    expect(screen.getByRole("slider", { name: "Replay sequence" })).toHaveValue("5");
+  });
+
+  it("associates the live sequence output with the replay range", () => {
+    render(
+      <RunScreen events={dirtyTreeEventsThroughSeq37()} manifest={dirtyTreeReplayManifest()} run={runningEnvelope()} />
+    );
+    const slider = screen.getByRole("slider", { name: "Replay sequence" });
+    const output = screen.getByText(/Replay position/).closest("output");
+    expect(output).toHaveTextContent("SEQ 37");
+    expect(output).toHaveAttribute("id");
+    expect(slider).toHaveAttribute("aria-describedby", output!.id);
+  });
+
+  it("reports honest terminal states without fabricating a score", () => {
+    const { rerender } = render(
+      <RunScreen
+        events={[event(1, "judge", "run.errored")]}
+        manifest={dirtyTreeReplayManifest()}
+        run={{ ...runningEnvelope(), state: "errored", ended_at: "2026-07-15T00:01:00.000Z" }}
+      />
+    );
+    expect(screen.getByText("Run errored")).toBeVisible();
+    expect(screen.queryByText("Run in progress")).not.toBeInTheDocument();
+
+    rerender(
+      <RunScreen
+        events={[]}
+        manifest={dirtyTreeReplayManifest()}
+        run={{ ...runningEnvelope(), state: "cancelled", ended_at: "2026-07-15T00:01:00.000Z" }}
+      />
+    );
+    expect(screen.getByText("Run cancelled")).toBeVisible();
+
+    rerender(
+      <RunScreen
+        events={[event(1, "judge", "run.finished")]}
+        manifest={dirtyTreeReplayManifest()}
+        run={{ ...runningEnvelope(), state: "completed", ended_at: "2026-07-15T00:01:00.000Z" }}
+      />
+    );
+    expect(screen.getByText("Locked verdict loading or unavailable")).toBeVisible();
+    expect(screen.queryByText(/\d+\/100/)).not.toBeInTheDocument();
+
+    rerender(
+      <RunScreen
+        events={[event(1, "judge", "run.finished")]}
+        manifest={dirtyTreeReplayManifest()}
+        run={{ ...runningEnvelope(), state: "completed", ended_at: "2026-07-15T00:01:00.000Z" }}
+        verdict={{ ...defeat(), status: "error", error: { code: "VERDICT_UNAVAILABLE", message: "private" } }}
+      />
+    );
+    expect(screen.getByText("Locked verdict unavailable")).toBeVisible();
+    expect(screen.queryByText("private")).not.toBeInTheDocument();
+  });
+
+  it("bounds long trace, artifact, diff, and diagnosis lists with omitted counts", async () => {
+    const user = userEvent.setup();
+    const refs = Array.from({ length: 230 }, (_, index) =>
+      `sha256:${index.toString(16).padStart(64, "0")}` as const
+    );
+    const manyEvents = Array.from({ length: 230 }, (_, seq) =>
+      event(seq, "verify", "runner.raw", {}, seq === 229 ? refs : [])
+    );
+    const manyArtifacts = Array.from({ length: 30 }, (_, index): ArtifactSummary => ({
+      ref: `sha256:${index.toString(16).padStart(64, "0")}`,
+      kind: "diff",
+      label: `Diff ${index}`,
+      summary: `Summary ${index}`,
+      mime: "text/x-diff",
+      bytes: index,
+      redacted: true
+    }));
+    const manySuggestions = Array.from({ length: 30 }, (_, index) => `Suggestion ${index}`);
+    render(
+      <RunScreen
+        artifacts={manyArtifacts}
+        diagnosis={{ ...diagnosis(), suggested_changes: manySuggestions }}
+        events={manyEvents}
+        manifest={dirtyTreeReplayManifest()}
+        run={runningEnvelope()}
+      />
+    );
+
+    expect(screen.getByText(/218 artifact refs omitted/)).toBeVisible();
+    await user.click(screen.getByRole("tab", { name: "Trace" }));
+    expect(screen.getByText(/30 trace rows omitted/)).toBeVisible();
+    await user.click(screen.getByRole("tab", { name: "Diff" }));
+    expect(screen.getByText(/18 diff summaries omitted/)).toBeVisible();
+    await user.click(screen.getByRole("tab", { name: "Diagnosis" }));
+    expect(screen.getByText(/18 suggestions omitted/)).toBeVisible();
   });
 
   it("shows a final numeric score only after a supplied locked verdict", () => {

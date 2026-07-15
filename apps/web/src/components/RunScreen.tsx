@@ -14,6 +14,34 @@ import { ReplayTimeline } from "./ReplayTimeline.js";
 
 const EMPTY_ARTIFACTS: readonly ArtifactSummary[] = [];
 
+function failedVerifier(event: TraceEvent, hardGate: boolean): boolean {
+  if (event.kind !== "verifier.completed" || !Array.isArray(event.data.verifier_results)) {
+    return false;
+  }
+  return event.data.verifier_results.some((candidate) => {
+    if (typeof candidate !== "object" || candidate === null) return false;
+    const result = candidate as Record<string, unknown>;
+    return result.passed === false && result.hard_gate === hardGate;
+  });
+}
+
+function hasHardGateRisk(events: readonly TraceEvent[]): boolean {
+  return events.some((event) =>
+    (event.kind === "file.changed" && event.data.protected === true)
+    || failedVerifier(event, true)
+  );
+}
+
+function hasGenericRisk(events: readonly TraceEvent[]): boolean {
+  return events.some((event) =>
+    (event.kind === "test.completed" && event.data.passed === false)
+    || (event.kind === "process.exited"
+      && typeof event.data.exit_code === "number"
+      && event.data.exit_code !== 0)
+    || failedVerifier(event, false)
+  );
+}
+
 export interface RunScreenProps {
   readonly run: RunEnvelope;
   readonly manifest: ReplayManifest;
@@ -39,25 +67,34 @@ export function RunScreen({
     return [...unique.values()].toSorted((left, right) => left.seq - right.seq);
   }, [events, run.run_id]);
   const lastSeq = orderedEvents.at(-1)?.seq ?? 0;
-  const previousLastRef = useRef<number | null>(null);
+  const previousTraceRef = useRef({ runId: run.run_id, lastSeq, length: orderedEvents.length });
   const [cursorSeq, setCursorSeq] = useState(lastSeq);
   const [selectedSeq, setSelectedSeq] = useState<number | null>(
     orderedEvents.at(-1)?.seq ?? null
   );
 
   useEffect(() => {
-    const previousLast = previousLastRef.current;
-    previousLastRef.current = lastSeq;
+    const previous = previousTraceRef.current;
+    const runChanged = previous.runId !== run.run_id;
+    const contracted = !runChanged
+      && (lastSeq < previous.lastSeq || orderedEvents.length < previous.length);
+    previousTraceRef.current = { runId: run.run_id, lastSeq, length: orderedEvents.length };
     if (orderedEvents.length === 0) {
       setCursorSeq(0);
       setSelectedSeq(null);
       return;
     }
-    if (previousLast === null || cursorSeq >= previousLast) {
+    const firstSeq = orderedEvents[0]!.seq;
+    if (runChanged || contracted || cursorSeq < firstSeq || cursorSeq > lastSeq) {
+      setCursorSeq(lastSeq);
+      setSelectedSeq(lastSeq);
+      return;
+    }
+    if (cursorSeq >= previous.lastSeq && lastSeq > previous.lastSeq) {
       setCursorSeq(lastSeq);
       setSelectedSeq(lastSeq);
     }
-  }, [cursorSeq, lastSeq, orderedEvents.length]);
+  }, [cursorSeq, lastSeq, orderedEvents, run.run_id]);
 
   const visibleEvents = useMemo(
     () => orderedEvents.filter(({ seq }) => seq <= cursorSeq),
@@ -66,22 +103,31 @@ export function RunScreen({
   const selectedEvent = visibleEvents.find(({ seq }) => seq === selectedSeq)
     ?? visibleEvents.at(-1)
     ?? null;
-  const visibleRisk = visibleEvents.some((event) => {
-    if (event.kind === "file.changed" && event.data.protected === true) return true;
-    if (event.kind === "test.completed" && event.data.passed === false) return true;
-    if (event.kind === "process.exited"
-      && typeof event.data.exit_code === "number"
-      && event.data.exit_code !== 0) return true;
-    if (event.kind !== "verifier.completed" || !Array.isArray(event.data.verifier_results)) {
-      return false;
-    }
-    return event.data.verifier_results.some((candidate) =>
-      typeof candidate === "object" && candidate !== null
-        && (candidate as Record<string, unknown>).passed === false
-    );
-  });
+  const hardGateRisk = hasHardGateRisk(visibleEvents);
+  const genericRisk = hasGenericRisk(visibleEvents);
   const finalVerdict = run.state === "completed" && verdict !== undefined
     && verdict.status !== "error" ? verdict : null;
+  let pendingLabel = "Run in progress";
+  let pendingClass = "run-progress";
+  if (run.state === "errored") {
+    pendingLabel = "Run errored";
+    pendingClass = "run-risk";
+  } else if (run.state === "cancelled") {
+    pendingLabel = "Run cancelled";
+    pendingClass = "run-risk";
+  } else if (run.state === "completed" && verdict?.status === "error") {
+    pendingLabel = "Locked verdict unavailable";
+    pendingClass = "run-risk";
+  } else if (run.state === "completed") {
+    pendingLabel = "Locked verdict loading or unavailable";
+    pendingClass = "run-progress";
+  } else if (hardGateRisk) {
+    pendingLabel = "Hard gate at risk";
+    pendingClass = "run-risk";
+  } else if (genericRisk) {
+    pendingLabel = "Run at risk";
+    pendingClass = "run-risk";
+  }
 
   function changeCursor(seq: number): void {
     setCursorSeq(seq);
@@ -97,9 +143,7 @@ export function RunScreen({
           <strong>{run.state.toUpperCase()}</strong>
         </div>
         {finalVerdict === null ? (
-          <p className={visibleRisk ? "run-risk" : "run-progress"}>
-            {visibleRisk ? "Hard gate at risk" : "Run in progress"}
-          </p>
+          <p className={pendingClass}>{pendingLabel}</p>
         ) : (
           <div className={`locked-live-verdict verdict-${finalVerdict.status}`}>
             <strong>{finalVerdict.status.toUpperCase()}</strong>

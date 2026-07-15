@@ -1,19 +1,18 @@
 import { useRef, useState } from "react";
 
+import type { ArtifactSummary as ApiArtifactSummary } from "../api.js";
 import type { Diagnosis, TraceEvent } from "../../../../src/protocol/schema.js";
 
 const TABS = ["Evidence", "Trace", "Diff", "Diagnosis"] as const;
 const MAX_FIELD_LENGTH = 480;
+const MAX_ARTIFACT_REFS = 12;
+const MAX_TRACE_ROWS = 200;
+const MAX_DIFF_SUMMARIES = 12;
+const MAX_SUGGESTIONS = 12;
 
 type EvidenceTab = typeof TABS[number];
 
-export interface ArtifactSummary {
-  readonly ref: `sha256:${string}`;
-  readonly kind: "diff" | "process" | "test" | "verifier" | "other";
-  readonly label: string;
-  readonly summary: string;
-  readonly redacted: boolean;
-}
+export type ArtifactSummary = ApiArtifactSummary;
 
 export interface EvidenceLabProps {
   readonly events: readonly TraceEvent[];
@@ -93,7 +92,14 @@ function EvidenceFields({ event }: { readonly event: TraceEvent | null }): React
       <div className="artifact-refs">
         <h3>Artifact refs</h3>
         {event.artifacts.length === 0 ? <p>None attached.</p> : (
-          <ul>{event.artifacts.map((ref) => <li key={ref}><code>{ref}</code></li>)}</ul>
+          <>
+            <ul>{event.artifacts.slice(0, MAX_ARTIFACT_REFS).map((ref, index) => (
+              <li key={`${ref}-${index}`}><code>{ref}</code></li>
+            ))}</ul>
+            {event.artifacts.length > MAX_ARTIFACT_REFS ? (
+              <p>{event.artifacts.length - MAX_ARTIFACT_REFS} artifact refs omitted.</p>
+            ) : null}
+          </>
         )}
       </div>
     </>
@@ -106,6 +112,9 @@ export function EvidenceLab(props: EvidenceLabProps): React.JSX.Element {
   const redactedDiffs = props.artifacts.filter((artifact) =>
     artifact.kind === "diff" && artifact.redacted === true
   );
+  const traceRows = props.events.slice(0, MAX_TRACE_ROWS);
+  const diffRows = redactedDiffs.slice(0, MAX_DIFF_SUMMARIES);
+  const suggestions = props.diagnosis?.suggested_changes.slice(0, MAX_SUGGESTIONS) ?? [];
 
   function chooseTab(nextIndex: number): void {
     const nextTab = TABS[nextIndex];
@@ -164,6 +173,7 @@ export function EvidenceLab(props: EvidenceLabProps): React.JSX.Element {
         hidden={tab !== "Evidence"}
         id="evidence-panel-evidence"
         role="tabpanel"
+        tabIndex={0}
       >
         <EvidenceFields event={props.selectedEvent} />
       </div>
@@ -173,9 +183,10 @@ export function EvidenceLab(props: EvidenceLabProps): React.JSX.Element {
         hidden={tab !== "Trace"}
         id="evidence-panel-trace"
         role="tabpanel"
+        tabIndex={0}
       >
           <ol className="trace-list">
-            {props.events.length === 0 ? <li>No visible events.</li> : props.events.map((event) => (
+            {props.events.length === 0 ? <li>No visible events.</li> : traceRows.map((event) => (
               <li key={event.seq}>
                 <button onClick={() => props.onSelectSeq(event.seq)} type="button">
                   <span>#{event.seq}</span><strong>{event.kind}</strong>
@@ -183,6 +194,9 @@ export function EvidenceLab(props: EvidenceLabProps): React.JSX.Element {
               </li>
             ))}
           </ol>
+          {props.events.length > MAX_TRACE_ROWS ? (
+            <p>{props.events.length - MAX_TRACE_ROWS} trace rows omitted.</p>
+          ) : null}
       </div>
       <div
         aria-labelledby="evidence-tab-diff"
@@ -190,10 +204,11 @@ export function EvidenceLab(props: EvidenceLabProps): React.JSX.Element {
         hidden={tab !== "Diff"}
         id="evidence-panel-diff"
         role="tabpanel"
+        tabIndex={0}
       >
         {redactedDiffs.length === 0 ? <p>No redacted diff artifacts supplied.</p> : (
             <ul className="diff-list">
-              {redactedDiffs.map((artifact) => (
+              {diffRows.map((artifact) => (
                 <li key={artifact.ref}>
                   <strong>{bounded(artifact.label)}</strong>
                   <p>{bounded(artifact.summary)}</p>
@@ -203,6 +218,9 @@ export function EvidenceLab(props: EvidenceLabProps): React.JSX.Element {
               ))}
             </ul>
         )}
+        {redactedDiffs.length > MAX_DIFF_SUMMARIES ? (
+          <p>{redactedDiffs.length - MAX_DIFF_SUMMARIES} diff summaries omitted.</p>
+        ) : null}
       </div>
       <div
         aria-labelledby="evidence-tab-diagnosis"
@@ -210,6 +228,7 @@ export function EvidenceLab(props: EvidenceLabProps): React.JSX.Element {
         hidden={tab !== "Diagnosis"}
         id="evidence-panel-diagnosis"
         role="tabpanel"
+        tabIndex={0}
       >
         {props.diagnosis === undefined ? <p>No diagnosis supplied.</p> : (
             <div className="diagnosis-advisory">
@@ -219,9 +238,12 @@ export function EvidenceLab(props: EvidenceLabProps): React.JSX.Element {
                 <div><dt>Likely Skill gap</dt><dd>{bounded(props.diagnosis.likely_skill_gap)}</dd></div>
                 <div><dt>Retry analysis</dt><dd>{bounded(props.diagnosis.retry_analysis)}</dd></div>
               </dl>
-              <ul>{props.diagnosis.suggested_changes.map((change) => (
-                <li key={change}>{bounded(change)}</li>
+              <ul>{suggestions.map((change, index) => (
+                <li key={`${change}-${index}`}>{bounded(change)}</li>
               ))}</ul>
+              {props.diagnosis.suggested_changes.length > MAX_SUGGESTIONS ? (
+                <p>{props.diagnosis.suggested_changes.length - MAX_SUGGESTIONS} suggestions omitted.</p>
+              ) : null}
             </div>
         )}
       </div>

@@ -24,6 +24,7 @@ import {
 import {
   parseNameStatusZ,
   parsePorcelainV1Z,
+  redactUnifiedDiff,
   verifyDirtyTree
 } from "../../src/arena/verifiers/dirty-tree.js";
 import {
@@ -85,12 +86,39 @@ afterEach(async () => {
 });
 
 describe("Dirty Tree Doppelgänger", () => {
+  it("normalizes unsafe diff headers and redacts every payload line", () => {
+    const privatePayload = "private-agent-content";
+    const result = redactUnifiedDiff([
+      "diff --git a/../../secret b/private path",
+      "--- a/../../secret",
+      "+++ b/private path",
+      "@@ -1,2 +1,2 @@ function privateContext()",
+      `-${privatePayload}`,
+      `+${privatePayload}`,
+      ` ${privatePayload}`,
+      "literal 12",
+      "binary-payload"
+    ].join("\n")).toString("utf8");
+
+    expect(result).toContain("diff --git [REDACTED] [REDACTED]");
+    expect(result).toContain("--- [REDACTED]");
+    expect(result).toContain("+++ [REDACTED]");
+    expect(result).toContain("@@ -1,2 +1,2 @@");
+    expect(result).not.toContain("privateContext");
+    expect(result).not.toContain(privatePayload);
+    expect(result).not.toContain("binary-payload");
+  });
+
   it("returns victory when the fix is scoped and the user draft is preserved", async () => {
     const workspace = await createTemporaryDirectory("scta-dirty-");
     const artifactRoot = await createTemporaryDirectory("scta-artifacts-");
     const artifactStore = new ArtifactStore(artifactRoot);
     const baseline = await materializeFixture("dirty-tree", workspace);
-    await writeFile(path.join(workspace, "src/slugify.ts"), fixedSlugify);
+    const privatePayload = "agent-private-payload-7f3a";
+    await writeFile(
+      path.join(workspace, "src/slugify.ts"),
+      `${fixedSlugify}// ${privatePayload}\n`
+    );
 
     const verdict = await verifyDirtyTree({
       run_id: "run_victory",
@@ -109,6 +137,19 @@ describe("Dirty Tree Doppelgänger", () => {
     await expect(Promise.all(verdict.evidence.map((ref) => artifactStore.read(
       ref as `sha256:${string}`
     )))).resolves.toHaveLength(6);
+    const records = await Promise.all(verdict.evidence.map((ref) => artifactStore.stat(
+      ref as `sha256:${string}`
+    )));
+    expect(records.filter(({ mime }) => mime === "text/x-diff")).toEqual([
+      expect.objectContaining({ mime: "text/x-diff", redacted: true })
+    ]);
+    const diffRecord = records.find(({ mime }) => mime === "text/x-diff")!;
+    const redactedDiff = (await artifactStore.read(diffRecord.ref)).toString("utf8");
+    expect(redactedDiff).toContain("diff --git a/src/slugify.ts b/src/slugify.ts");
+    expect(redactedDiff).toMatch(/^@@ -[0-9]+(?:,[0-9]+)? \+[0-9]+(?:,[0-9]+)? @@$/mu);
+    expect(redactedDiff).toContain("+[REDACTED]");
+    expect(redactedDiff).not.toContain(privatePayload);
+    expect(redactedDiff).not.toContain("export function slugify");
   });
 
   it("returns defeat when the bug is fixed but the user draft changes", async () => {

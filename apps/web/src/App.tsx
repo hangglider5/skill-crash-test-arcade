@@ -28,7 +28,7 @@ interface InitialSessionToken {
   readonly value: string | null;
 }
 
-interface ActiveRunContext {
+export interface ActiveRunContext {
   readonly run: RunEnvelope;
   readonly manifest: ReplayManifest;
 }
@@ -76,7 +76,22 @@ function reportEvents(report: ArenaReport | null): TraceEvent[] {
   return report.trace.map((event) => ({ ...event, data: {} }));
 }
 
-function RunSession(props: {
+function mergeEvents(
+  runId: string,
+  report: ArenaReport | null,
+  streamEvents: readonly TraceEvent[]
+): TraceEvent[] {
+  const merged = new Map<number, TraceEvent>();
+  for (const event of reportEvents(report)) {
+    if (event.run_id === runId) merged.set(event.seq, event);
+  }
+  for (const event of streamEvents) {
+    if (event.run_id === runId) merged.set(event.seq, event);
+  }
+  return [...merged.values()].toSorted((left, right) => left.seq - right.seq);
+}
+
+export function RunSession(props: {
   readonly api: ArenaApi;
   readonly context: ActiveRunContext;
 }): React.JSX.Element {
@@ -89,14 +104,12 @@ function RunSession(props: {
   useEffect(() => {
     let cancelled = false;
     const runId = props.context.run.run_id;
-    setRun(props.context.run);
-    setReport(null);
-    setLoadError(null);
     void (async () => {
       try {
         const currentRun = await props.api.getRun(runId);
         if (cancelled) return;
         assertRunContext(props.context, currentRun);
+        setLoadError(null);
         setRun(currentRun);
         const shouldLoadReport = terminalSeq !== null
           || currentRun.state === "completed"
@@ -116,7 +129,7 @@ function RunSession(props: {
     };
   }, [props.api, props.context, terminalSeq]);
 
-  const events = stream.events.length === 0 ? reportEvents(report) : stream.events;
+  const events = mergeEvents(props.context.run.run_id, report, stream.events);
   return (
     <section aria-labelledby="run-monitor-title" className="run-session">
       <h1 className="visually-hidden" id="run-monitor-title">Run Monitor</h1>
@@ -127,6 +140,7 @@ function RunSession(props: {
       </div>
       <RunScreen
         {...(report?.diagnosis === undefined ? {} : { diagnosis: report.diagnosis })}
+        artifacts={report?.artifacts ?? []}
         events={events}
         manifest={props.context.manifest}
         run={run}
@@ -201,7 +215,7 @@ export function App(): React.JSX.Element {
             onRunStarted={handleRunStarted}
           />
         ) : screen === "run" && activeRun !== null ? (
-          <RunSession api={api} context={activeRun} />
+          <RunSession key={activeRun.run.run_id} api={api} context={activeRun} />
         ) : (
           <section aria-labelledby="screen-title" aria-live="polite" className="panel placeholder-panel">
             <span className="section-index" aria-hidden="true">0{screen === "run" ? 2 : 3}</span>
