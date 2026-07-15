@@ -21,7 +21,7 @@ pnpm install
 pnpm dev
 ```
 
-Open the startup URL printed by Core, for example `http://localhost:4317/?token=…`. The token is generated per process, is removed from browser history after the app reads it, and is required for every private API request. Core binds only to `127.0.0.1`; the Vite development UI is at `127.0.0.1:5173` and proxies `/api` to Core.
+For development, open **`http://127.0.0.1:5173/?token=dev-token`**. Core stays on `127.0.0.1:4317` with browser auto-open disabled, while Vite serves the UI on `127.0.0.1:5173`. Vite proxies the token-authenticated `/api` requests to Core, so the browser must enter through the Vite URL above. The app removes the token from browser history after reading it.
 
 Release commands:
 
@@ -33,7 +33,7 @@ pnpm test:e2e
 pnpm smoke:live
 ```
 
-`pnpm start` serves the built web app and Core from the tokenized URL. `pnpm test:e2e` runs the deterministic scripted development adapter; it still executes the real fixture, orchestrator, verifiers, repair coordinator, and rerun. `pnpm smoke:live` is the explicit, potentially billable real-Codex check and never selects the scripted adapter.
+After `pnpm build`, `pnpm start` serves the built web app from Core, prints and opens a randomized tokenized `http://localhost:4317/?token=…` URL, and keeps the server bound to loopback. `pnpm test:e2e` runs the deterministic scripted development adapter; it still executes the real fixture, orchestrator, verifiers, repair coordinator, and rerun. `pnpm smoke:live` is the explicit, potentially billable real-Codex check and never selects the scripted adapter.
 
 ## Architecture
 

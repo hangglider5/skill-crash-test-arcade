@@ -8,7 +8,7 @@
   },
   "scripts": {
     "dev": "NODE_ENV=development concurrently -k -n core,web \"pnpm dev:core\" \"pnpm dev:web\"",
-    "dev:core": "tsx watch src/core/cli.ts --dev-token dev-token",
+    "dev:core": "tsx watch src/core/cli.ts --dev-token dev-token --no-open",
     "dev:web": "vite",
     "build": "tsup src/core/cli.ts --format esm --out-dir dist/core && vite build",
     "start": "node dist/core/cli.js",
