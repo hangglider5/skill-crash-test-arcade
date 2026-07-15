@@ -34,6 +34,7 @@ import { z } from "zod";
 import { importSkill } from "./importer.js";
 import type { CreateRunRequest } from "./orchestrator.js";
 import type { RunDiagnosisService } from "./diagnosis.js";
+import { ExactActiveAuthority } from "./repair-authority.js";
 import {
   validateSnapshotIdentity
 } from "./snapshot-identity.js";
@@ -129,7 +130,7 @@ interface PendingRepair {
 }
 
 const PROCESS_REPAIR_REVIEW_LOCKS = new Map<string, Promise<void>>();
-const PROCESS_ACTIVE_REPAIRS = new Map<string, PendingRepair>();
+const PROCESS_ACTIVE_REPAIRS = new ExactActiveAuthority<PendingRepair>();
 
 function portableParts(value: string): string[] {
   if (path.posix.isAbsolute(value) || value.includes("\\")) throw new Error(`Unsafe snapshot path: ${value}`);
@@ -491,8 +492,11 @@ export class RepairCoordinator {
     await verifySnapshot(snapshot, originalModes);
     await this.#options.runStore.writeRecord(runId, "repair.json", { schema: "arena.repair/v1", repair_id: repairId, run_id: runId, status: "pending", snapshot_hash: baseline.snapshot_hash, created_at: createdAt, changed_paths: changedPaths, patch_ref: artifact.ref });
     const authorityKey = this.#repairReviewKey(runId);
-    const previous = PROCESS_ACTIVE_REPAIRS.get(authorityKey);
-    if (previous?.state === "pending") previous.state = "rejected";
+    const previous = PROCESS_ACTIVE_REPAIRS.current(authorityKey);
+    if (previous?.state === "pending") {
+      previous.state = "rejected";
+      PROCESS_ACTIVE_REPAIRS.release(authorityKey, previous);
+    }
     const pending: PendingRepair = {
       proposal, baseline, manifestId: context.manifest_id, originalModes,
       ownedDirectory, ownedSource,
@@ -506,7 +510,7 @@ export class RepairCoordinator {
     };
     this.#repairs.set(repairId, pending);
     this.#activeRepairByRun.set(runId, repairId);
-    PROCESS_ACTIVE_REPAIRS.set(authorityKey, pending);
+    PROCESS_ACTIVE_REPAIRS.replace(authorityKey, pending);
     return proposal;
   }
 
@@ -524,7 +528,7 @@ export class RepairCoordinator {
     if (repair === undefined || repair.proposal.repair_id !== repairId
       || repair.state !== "pending"
       || this.#activeRepairByRun.get(repair.proposal.run_id) !== repairId
-      || PROCESS_ACTIVE_REPAIRS.get(this.#repairReviewKey(repair.proposal.run_id)) !== repair) {
+      || PROCESS_ACTIVE_REPAIRS.current(this.#repairReviewKey(repair.proposal.run_id)) !== repair) {
       throw new Error("Candidate patch is unavailable");
     }
     const record = await this.#options.artifactStore.stat(repair.proposal.patch_ref);
@@ -568,7 +572,7 @@ export class RepairCoordinator {
     const repair = this.#repairs.get(repairId);
     if (repair?.state !== "pending"
       || this.#activeRepairByRun.get(repair.proposal.run_id) !== repairId
-      || PROCESS_ACTIVE_REPAIRS.get(this.#repairReviewKey(repair.proposal.run_id)) !== repair) {
+      || PROCESS_ACTIVE_REPAIRS.current(this.#repairReviewKey(repair.proposal.run_id)) !== repair) {
       throw new Error(`Repair is not pending: ${repairId}`);
     }
     await this.#options.runStore.writeRecord(repair.baseline.run_id, "repair.json", {
@@ -579,6 +583,7 @@ export class RepairCoordinator {
       reason: { code: "USER_REJECTED" }
     });
     repair.state = "rejected";
+    PROCESS_ACTIVE_REPAIRS.release(this.#repairReviewKey(repair.proposal.run_id), repair);
   }
 
   async approveAndRerun(repairId: string): Promise<RunEnvelope> {
@@ -594,7 +599,7 @@ export class RepairCoordinator {
     const repair = this.#repairs.get(repairId);
     if (repair?.state !== "pending"
       || this.#activeRepairByRun.get(repair.proposal.run_id) !== repairId
-      || PROCESS_ACTIVE_REPAIRS.get(this.#repairReviewKey(repair.proposal.run_id)) !== repair) {
+      || PROCESS_ACTIVE_REPAIRS.current(this.#repairReviewKey(repair.proposal.run_id)) !== repair) {
       throw new Error(`Repair is not pending: ${repairId}`);
     }
     repair.state = "approving";
@@ -706,6 +711,7 @@ export class RepairCoordinator {
         child_run_id: child.run_id, new_snapshot_hash: repaired.source_hash
       });
       repair.state = "approved";
+      PROCESS_ACTIVE_REPAIRS.release(this.#repairReviewKey(repair.proposal.run_id), repair);
       return child;
     } catch {
       repair.state = "failed";
@@ -716,6 +722,7 @@ export class RepairCoordinator {
         changed_paths: repair.proposal.changed_paths, patch_ref: repair.proposal.patch_ref,
         error: { code: "REPAIR_APPROVAL_FAILED" }
       }).catch(() => undefined);
+      PROCESS_ACTIVE_REPAIRS.release(this.#repairReviewKey(repair.proposal.run_id), repair);
       throw new RepairApprovalError();
     }
   }
