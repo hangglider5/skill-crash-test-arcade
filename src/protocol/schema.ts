@@ -36,7 +36,7 @@ export const TraceEventSchema = z.object({
   seq: z.number().int().nonnegative(),
   phase: PhaseSchema,
   kind: TraceKindSchema,
-  actor: z.enum(["arena", "codex", "verifier", "gpt-5.6"]),
+  actor: z.enum(["arena", "codex", "verifier", "gpt-5.6-sol"]),
   span_id: z.string().min(1).optional(),
   data: z.record(z.string(), z.unknown()).default({}),
   artifacts: z.array(ArtifactRefSchema).default([])
@@ -90,7 +90,7 @@ export const RunEnvelopeSchema = z.object({
   fixture_hash: HashSchema,
   runner: z.object({
     adapter: z.literal("codex-cli"),
-    model: z.literal("gpt-5.6")
+    model: z.literal("gpt-5.6-sol")
   }).strict(),
   state: z.enum([
     "created",
@@ -141,7 +141,7 @@ export const SkillSnapshotSchema = z.object({
 export const SkillContractSchema = z.object({
   schema: z.literal("arena.skill-contract/v1"),
   snapshot_hash: HashSchema,
-  model: z.literal("gpt-5.6"),
+  model: z.literal("gpt-5.6-sol"),
   promises: z.array(z.object({
     statement: z.string().min(1),
     evidence: z.string().min(1),
@@ -156,7 +156,7 @@ export const SkillContractSchema = z.object({
 export const DiagnosisSchema = z.object({
   schema: z.literal("arena.diagnosis/v1"),
   run_id: z.string().min(1),
-  model: z.literal("gpt-5.6"),
+  model: z.literal("gpt-5.6-sol"),
   observed_failure: z.string().min(1),
   likely_skill_gap: z.string().min(1),
   retry_analysis: z.string().min(1),

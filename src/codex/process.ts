@@ -90,8 +90,8 @@ function toolOverrides(toolEnv: Record<string, string> | undefined): string[] {
 }
 
 export function buildCodexArguments(input: AgentRunInput): string[] {
-  if (input.model !== "gpt-5.6") {
-    throw new RunnerError("RUNNER_SPAWN", "Runner model must be gpt-5.6");
+  if (input.model !== "gpt-5.6-sol") {
+    throw new RunnerError("RUNNER_SPAWN", "Runner model must be gpt-5.6-sol");
   }
   return [
     "exec",
@@ -107,7 +107,7 @@ export function buildCodexArguments(input: AgentRunInput): string[] {
     "--sandbox",
     input.sandbox,
     "--model",
-    "gpt-5.6",
+    "gpt-5.6-sol",
     "--output-schema",
     input.output_schema_path,
     "--output-last-message",

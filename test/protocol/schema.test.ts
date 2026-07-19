@@ -50,7 +50,7 @@ const validRunEnvelope = {
   manifest_hash: hashA,
   snapshot_hash: hashB,
   fixture_hash: hashC,
-  runner: { adapter: "codex-cli", model: "gpt-5.6" },
+  runner: { adapter: "codex-cli", model: "gpt-5.6-sol" },
   state: "created",
   started_at: "2026-07-14T08:00:00.000Z"
 } as const;
@@ -86,7 +86,7 @@ const validSnapshot = {
 const validContract = {
   schema: "arena.skill-contract/v1",
   snapshot_hash: hashA,
-  model: "gpt-5.6",
+  model: "gpt-5.6-sol",
   promises: [{
     statement: "Runs the focused test before completion",
     evidence: "SKILL.md:20",
@@ -101,7 +101,7 @@ const validContract = {
 const validDiagnosis = {
   schema: "arena.diagnosis/v1",
   run_id: "run_01",
-  model: "gpt-5.6",
+  model: "gpt-5.6-sol",
   observed_failure: "The focused test failed",
   likely_skill_gap: "The skill skipped dependency inspection",
   retry_analysis: "A retry without a patch would fail identically",

@@ -9,7 +9,7 @@ import type { AgentRunner } from "./types.js";
 export interface StructuredRunRequest<T> {
   cwd: string;
   prompt: string;
-  model: "gpt-5.6";
+  model: "gpt-5.6-sol";
   schema: Record<string, unknown>;
   parse(value: unknown): T;
   timeout_ms: number;
@@ -83,8 +83,8 @@ export class CodexStructuredModel implements StructuredModel {
   }
 
   async run<T>(request: StructuredRunRequest<T>): Promise<T> {
-    if (request.model !== "gpt-5.6") {
-      throw new TypeError("Structured model must be gpt-5.6");
+    if (request.model !== "gpt-5.6-sol") {
+      throw new TypeError("Structured model must be gpt-5.6-sol");
     }
     const root = await this.#canonicalRoot();
     const allocation = await this.#allocateAndWriteSchema(root, request.schema);
@@ -94,7 +94,7 @@ export class CodexStructuredModel implements StructuredModel {
         run_id: `structured-${allocation.id}`,
         cwd: request.cwd,
         prompt: request.prompt,
-        model: "gpt-5.6",
+        model: "gpt-5.6-sol",
         sandbox: "read-only",
         output_schema_path: allocation.schemaPath,
         output_path: allocation.outputPath,

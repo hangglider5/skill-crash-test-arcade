@@ -46,7 +46,7 @@ function expectedLineage(
   return {
     manifest_hash: loaded.hash,
     fixture_hash: sha256(canonicalJson(loaded.manifest.fixture)),
-    runner: { adapter: "codex-cli" as const, model: "gpt-5.6" as const },
+    runner: { adapter: "codex-cli" as const, model: "gpt-5.6-sol" as const },
     snapshot_execution_fingerprint: computeSnapshotExecutionFingerprint(snapshot)
   };
 }

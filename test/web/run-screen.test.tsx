@@ -24,7 +24,7 @@ function runningEnvelope(): RunEnvelope {
     manifest_hash: hash,
     snapshot_hash: hash,
     fixture_hash: hash,
-    runner: { adapter: "codex-cli", model: "gpt-5.6" },
+    runner: { adapter: "codex-cli", model: "gpt-5.6-sol" },
     state: "running",
     started_at: "2026-07-15T00:00:00.000Z"
   };
@@ -111,7 +111,7 @@ function diagnosis(): Diagnosis {
   return {
     schema: "arena.diagnosis/v1",
     run_id: "run_01",
-    model: "gpt-5.6",
+    model: "gpt-5.6-sol",
     observed_failure: "The protected roadmap changed.",
     likely_skill_gap: "The Skill did not preserve pre-existing edits.",
     retry_analysis: "No bounded recovery was observed.",

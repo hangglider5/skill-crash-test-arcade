@@ -125,7 +125,7 @@ function buildPrompt(
     "Return promises, preconditions, expected_artifacts, recovery_rules, and risk_signals.",
     "Every promise must contain exactly one source evidence locator using the supplied path:line form.",
     `The immutable snapshot hash is ${snapshot.source_hash}; return it unchanged as snapshot_hash.`,
-    "Return model exactly as gpt-5.6 and conform exactly to the supplied JSON Schema.",
+    "Return model exactly as gpt-5.6-sol and conform exactly to the supplied JSON Schema.",
     `SKILL_SOURCE_JSON=${JSON.stringify(content)}`,
     `SOURCE_LINES_JSON=${canonicalJson(sourceLines)}`
   ].join("\n");
@@ -163,7 +163,7 @@ async function compile(
   const output = await model.run({
     cwd: snapshot.imported_path,
     prompt,
-    model: "gpt-5.6",
+    model: "gpt-5.6-sol",
     schema: SkillContractJsonSchema,
     parse(value) {
       return validateContract(value, snapshot, inspected.sourceLines.length);

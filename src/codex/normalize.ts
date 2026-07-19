@@ -243,7 +243,7 @@ async function normalizeOne(
     return [buildEvent(
       context,
       "agent.claimed",
-      "gpt-5.6",
+      "gpt-5.6-sol",
       message === undefined ? {} : { text: message },
       itemId
     )];

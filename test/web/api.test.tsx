@@ -17,7 +17,7 @@ function terminalReport(artifact: Record<string, unknown>): Record<string, unkno
       manifest_hash: hashA,
       snapshot_hash: hashA,
       fixture_hash: hashA,
-      runner: { adapter: "codex-cli", model: "gpt-5.6" },
+      runner: { adapter: "codex-cli", model: "gpt-5.6-sol" },
       state: "completed",
       started_at: "2026-07-15T00:00:00.000Z",
       ended_at: "2026-07-15T00:01:00.000Z"

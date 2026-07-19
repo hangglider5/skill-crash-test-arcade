@@ -13,6 +13,12 @@ test("runs the Dirty Tree defeat, reviewed Skill repair, and controlled victory"
   await expect(page.getByRole("main")).toBeVisible();
   await expect(page.locator("vite-error-overlay")).toHaveCount(0);
 
+  const liveProof = page.getByRole("region", { name: "Prior authorized live smoke" });
+  await expect(liveProof.getByText("LIVE · GPT-5.6 SOL", { exact: true })).toBeVisible();
+  await expect(liveProof.getByText("VICTORY · 80/100", { exact: true })).toBeVisible();
+  await expect(liveProof.getByText("5/5 VERIFIERS PASSED", { exact: true })).toBeVisible();
+  await expect(liveProof.getByRole("link", { name: "Download sanitized report" })).toBeVisible();
+
   await page.getByRole("tab", { name: "Sample" }).click();
   await expect(page.getByText("Recorded Replay", { exact: true })).toBeVisible();
   await expect(page.getByText(/distinct from a Live Run/i)).toBeVisible();

@@ -77,7 +77,7 @@ function envelope(state: RunEnvelope["state"] = "completed"): RunEnvelope {
     manifest_hash: hashA,
     snapshot_hash: hashB,
     fixture_hash: hashC,
-    runner: { adapter: "codex-cli", model: "gpt-5.6" },
+    runner: { adapter: "codex-cli", model: "gpt-5.6-sol" },
     state,
     started_at: "2026-07-15T00:00:00.000Z",
     ...(state === "created" || state === "running" || state === "judging"
@@ -103,7 +103,7 @@ function diagnosis(): Diagnosis {
   return {
     schema: "arena.diagnosis/v1",
     run_id: "run_01",
-    model: "gpt-5.6",
+    model: "gpt-5.6-sol",
     observed_failure: "Protected draft changed",
     likely_skill_gap: "Preservation rule missing",
     retry_analysis: "No safe retry",
@@ -135,7 +135,7 @@ function contract(): SkillContract {
   return {
     schema: "arena.skill-contract/v1",
     snapshot_hash: hashB,
-    model: "gpt-5.6",
+    model: "gpt-5.6-sol",
     promises: [],
     preconditions: [],
     expected_artifacts: [],
@@ -187,7 +187,7 @@ function dependencies(overrides: Partial<ServerDependencies> = {}): ServerDepend
       return {
         ok: true,
         checks: [{ id: "app-data", ok: true, message: "ready" }],
-        model: { target: "gpt-5.6", status: "configured-unverified" }
+        model: { target: "gpt-5.6-sol", status: "configured-unverified" }
       };
     },
     async importSkill() { return snapshot(); },
@@ -213,7 +213,7 @@ function dependencies(overrides: Partial<ServerDependencies> = {}): ServerDepend
       return {
         manifest_hash: hashA,
         fixture_hash: hashC,
-        runner: { adapter: "codex-cli", model: "gpt-5.6" },
+        runner: { adapter: "codex-cli", model: "gpt-5.6-sol" },
         snapshot_execution_fingerprint: trustedFingerprint
       };
     },

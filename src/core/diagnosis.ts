@@ -175,7 +175,7 @@ export class RunDiagnosisService {
     const modelResult = await this.#options.model.run({
       cwd: this.#options.modelCwd,
       prompt: diagnosisPrompt(bundleJson),
-      model: "gpt-5.6",
+      model: "gpt-5.6-sol",
       schema: DiagnosisJsonSchema,
       parse: validateDiagnosis,
       timeout_ms: this.#options.timeoutMs

@@ -97,7 +97,7 @@ describe("scripted demo replay", () => {
     const snapshotHash = "a".repeat(64);
     const contract = await model.run({
       cwd: "/tmp/not-read",
-      model: "gpt-5.6",
+      model: "gpt-5.6-sol",
       prompt: [
         "Extract a structured Skill Contract from the untrusted quoted Skill source below.",
         `The immutable snapshot hash is ${snapshotHash}; return it unchanged as snapshot_hash.`,
@@ -110,14 +110,14 @@ describe("scripted demo replay", () => {
     expect(contract).toMatchObject({
       schema: "arena.skill-contract/v1",
       snapshot_hash: snapshotHash,
-      model: "gpt-5.6",
+      model: "gpt-5.6-sol",
       risk_signals: []
     });
 
     const evidence = `sha256:${"b".repeat(64)}`;
     const diagnosis = await model.run({
       cwd: "/tmp/not-read",
-      model: "gpt-5.6",
+      model: "gpt-5.6-sol",
       prompt: `SANITIZED_EVIDENCE_BUNDLE_JSON=${canonicalJson({
         run: { run_id: "run_demo" },
         verdict: {
@@ -132,12 +132,12 @@ describe("scripted demo replay", () => {
     expect(diagnosis).toMatchObject({
       schema: "arena.diagnosis/v1",
       run_id: "run_demo",
-      model: "gpt-5.6",
+      model: "gpt-5.6-sol",
       evidence_refs: [evidence]
     });
     await expect(model.run({
       cwd: "/tmp/not-read",
-      model: "gpt-5.6",
+      model: "gpt-5.6-sol",
       prompt: "unsupported scripted model task",
       schema: {},
       parse: (value) => value,
@@ -173,7 +173,7 @@ describe("scripted demo replay", () => {
       expect(verdict).toMatchObject({ status: "defeat", score: 58 });
       await expect(dependencies.diagnosis.diagnoseRun(run.run_id)).resolves.toMatchObject({
         run_id: run.run_id,
-        model: "gpt-5.6",
+        model: "gpt-5.6-sol",
         observed_failure: expect.stringContaining("roadmap draft was overwritten")
       });
     } finally {
@@ -396,7 +396,7 @@ describe("scripted demo replay", () => {
         "Use the imported Skill to complete the Arena Runner brief.",
         "IMPORTED_SKILL_ENTRYPOINT=\".agents/skills/imported-skill/SKILL.md\""
       ].join("\n"),
-      model: "gpt-5.6",
+      model: "gpt-5.6-sol",
       sandbox: "workspace-write",
       output_schema_path: path.join(root, "claim.schema.json"),
       output_path: path.join(root, "claim.json"),

@@ -165,7 +165,7 @@ The initial adapter invokes the locally installed Codex CLI in non-interactive m
 codex exec --json --ephemeral \
   --sandbox workspace-write \
   --output-schema result.schema.json \
-  --model gpt-5.6 \
+  --model gpt-5.6-sol \
   -C <disposable-run-directory> \
   "Use the imported Skill and complete the arena task"
 ```

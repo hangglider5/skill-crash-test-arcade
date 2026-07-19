@@ -60,14 +60,14 @@ const ScriptedDiagnosisBundleSchema = z.object({
 /** Deterministic structured output for the explicit development/test demo adapter only. */
 export class ScriptedStructuredModel implements StructuredModel {
   async run<T>(request: StructuredRunRequest<T>): Promise<T> {
-    if (request.model !== "gpt-5.6") throw new Error("Scripted model must target gpt-5.6");
+    if (request.model !== "gpt-5.6-sol") throw new Error("Scripted model must target gpt-5.6-sol");
     if (request.prompt.startsWith("Extract a structured Skill Contract")) {
       const match = /immutable snapshot hash is ([a-f0-9]{64});/u.exec(request.prompt);
       if (match?.[1] === undefined) throw new Error("Scripted contract snapshot is unavailable");
       return request.parse({
         schema: "arena.skill-contract/v1",
         snapshot_hash: match[1],
-        model: "gpt-5.6",
+        model: "gpt-5.6-sol",
         promises: [{
           statement: "Implement the smallest relevant fix and run focused verification.",
           evidence: "SKILL.md:1",
@@ -95,7 +95,7 @@ export class ScriptedStructuredModel implements StructuredModel {
       return request.parse({
         schema: "arena.diagnosis/v1",
         run_id: bundle.run.run_id,
-        model: "gpt-5.6",
+        model: "gpt-5.6-sol",
         observed_failure: "The target bug was fixed, but the pre-existing roadmap draft was overwritten.",
         likely_skill_gap: "The Skill lacks an explicit rule to preserve unrelated pre-existing changes.",
         retry_analysis: "No meaningless retry occurred; the failure is a workflow policy gap.",

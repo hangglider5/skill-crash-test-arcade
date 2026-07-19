@@ -11,6 +11,8 @@ import type {
   SkillContract,
   SkillSnapshot
 } from "../../../../src/protocol/schema.js";
+import { VERIFIED_LIVE_PROOF } from "../live-proof.js";
+import { LiveProofCard } from "./LiveProofCard.js";
 
 type ImportLobbyApi = Pick<
   ArenaApi,
@@ -441,6 +443,7 @@ export function ImportLobby({
         </div>
         <ProgressRail current={progressStep} />
       </header>
+      <LiveProofCard {...VERIFIED_LIVE_PROOF} />
       <div className="import-grid">
         <div className="source-column">
           <section aria-labelledby="source-title" className="source-panel">

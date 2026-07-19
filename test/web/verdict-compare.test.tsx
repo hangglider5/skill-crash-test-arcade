@@ -24,7 +24,7 @@ function run(overrides: Partial<RunEnvelope> = {}): RunEnvelope {
     manifest_hash: hashA,
     snapshot_hash: hashA,
     fixture_hash: hashB,
-    runner: { adapter: "codex-cli", model: "gpt-5.6" },
+    runner: { adapter: "codex-cli", model: "gpt-5.6-sol" },
     state: "completed",
     started_at: "2026-07-15T00:00:00.000Z",
     ended_at: "2026-07-15T00:01:00.000Z",
@@ -74,7 +74,7 @@ function diagnosis(): Diagnosis {
   return {
     schema: "arena.diagnosis/v1",
     run_id: "run_baseline",
-    model: "gpt-5.6",
+    model: "gpt-5.6-sol",
     observed_failure: "A protected pre-existing change was overwritten.",
     likely_skill_gap: "The Skill lacks a preservation check before patching.",
     retry_analysis: "No bounded recovery followed the mutation.",

@@ -336,7 +336,7 @@ export function VerdictCompare(props: VerdictCompareProps): React.JSX.Element {
 
           <section className="result-section diagnosis-section">
             <div className="section-heading-row">
-              <h2>GPT-5.6 diagnosis</h2>
+              <h2>GPT-5.6 Sol diagnosis</h2>
               <span className="advisory-label">ADVISORY</span>
             </div>
             {diagnosis === undefined ? (

@@ -200,7 +200,7 @@ Create .env.example:
     SCTA_HOST=127.0.0.1
     SCTA_PORT=4317
     SCTA_APP_DATA=.arena
-    SCTA_MODEL=gpt-5.6
+    # The exact model is fixed in code as gpt-5.6-sol.
 
 Create test/protocol/schema.test.ts:
 
@@ -250,7 +250,7 @@ Create test/protocol/schema.test.ts:
           manifest_hash: "a".repeat(64),
           snapshot_hash: "b".repeat(64),
           fixture_hash: "c".repeat(64),
-          runner: { adapter: "codex-cli", model: "gpt-5.6" },
+          runner: { adapter: "codex-cli", model: "gpt-5.6-sol" },
           state: "created",
           started_at: "2026-07-14T08:00:00.000Z"
         });
@@ -292,7 +292,7 @@ Implement src/protocol/schema.ts with strict Zod objects. Use snake_case JSON fi
       seq: z.number().int().nonnegative(),
       phase: PhaseSchema,
       kind: TraceKindSchema,
-      actor: z.enum(["arena", "codex", "verifier", "gpt-5.6"]),
+      actor: z.enum(["arena", "codex", "verifier", "gpt-5.6-sol"]),
       span_id: z.string().min(1).optional(),
       data: z.record(z.string(), z.unknown()).default({}),
       artifacts: z.array(ArtifactRefSchema).default([])
@@ -346,7 +346,7 @@ Implement src/protocol/schema.ts with strict Zod objects. Use snake_case JSON fi
       fixture_hash: HashSchema,
       runner: z.object({
         adapter: z.literal("codex-cli"),
-        model: z.literal("gpt-5.6")
+        model: z.literal("gpt-5.6-sol")
       }).strict(),
       state: z.enum(["created", "running", "judging", "completed", "errored", "cancelled"]),
       started_at: z.string().datetime(),
@@ -379,7 +379,7 @@ Add the remaining schemas exactly:
     export const SkillContractSchema = z.object({
       schema: z.literal("arena.skill-contract/v1"),
       snapshot_hash: HashSchema,
-      model: z.literal("gpt-5.6"),
+      model: z.literal("gpt-5.6-sol"),
       promises: z.array(z.object({
         statement: z.string().min(1),
         evidence: z.string().min(1),
@@ -394,7 +394,7 @@ Add the remaining schemas exactly:
     export const DiagnosisSchema = z.object({
       schema: z.literal("arena.diagnosis/v1"),
       run_id: z.string().min(1),
-      model: z.literal("gpt-5.6"),
+      model: z.literal("gpt-5.6-sol"),
       observed_failure: z.string().min(1),
       likely_skill_gap: z.string().min(1),
       retry_analysis: z.string().min(1),
@@ -965,7 +965,7 @@ Define the core interface in the test expectation:
       run_id: string;
       cwd: string;
       prompt: string;
-      model: "gpt-5.6";
+      model: "gpt-5.6-sol";
       sandbox: "read-only" | "workspace-write";
       output_schema_path: string;
       output_path: string;
@@ -1005,7 +1005,7 @@ CodexProcessRunner must build these arguments in order:
     -c
     shell_environment_policy.inherit=none
     --sandbox <input.sandbox>
-    --model gpt-5.6
+    --model gpt-5.6-sol
     --output-schema <input.output_schema_path>
     --output-last-message <input.output_path>
     --cd <input.cwd>
@@ -1071,7 +1071,7 @@ Expected: fake process exits cleanly, normalized event assertions pass, and time
             return {
               schema: "arena.skill-contract/v1",
               snapshot_hash: "b".repeat(64),
-              model: "gpt-5.6",
+              model: "gpt-5.6-sol",
               promises: [{
                 statement: "Run focused verification",
                 evidence: "SKILL.md:7",
@@ -1107,7 +1107,7 @@ StructuredModel must accept:
     export interface StructuredRunRequest<T> {
       cwd: string;
       prompt: string;
-      model: "gpt-5.6";
+      model: "gpt-5.6-sol";
       schema: Record<string, unknown>;
       parse(value: unknown): T;
       timeout_ms: number;

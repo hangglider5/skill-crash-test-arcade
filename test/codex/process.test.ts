@@ -34,7 +34,7 @@ async function fixture(prompt = "ok"): Promise<AgentRunInput> {
     run_id: "run_01",
     cwd,
     prompt,
-    model: "gpt-5.6",
+    model: "gpt-5.6-sol",
     sandbox: "workspace-write",
     output_schema_path: schema,
     output_path: output,
@@ -85,7 +85,7 @@ describe("CodexProcessRunner", () => {
         "-c", 'shell_environment_policy.set.CI="1"',
         "-c", 'shell_environment_policy.set.NO_COLOR="true"',
         "-c", 'shell_environment_policy.set.PATH="/fault:/git:/node:/shell"',
-        "--sandbox", "workspace-write", "--model", "gpt-5.6",
+        "--sandbox", "workspace-write", "--model", "gpt-5.6-sol",
         "--output-schema", input.output_schema_path,
         "--output-last-message", input.output_path,
         "--cd", input.cwd

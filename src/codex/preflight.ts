@@ -266,6 +266,6 @@ export async function runPreflight(options: PreflightOptions = {}): Promise<Pref
   return {
     ok: checks.every((check) => check.ok),
     checks,
-    model: { target: "gpt-5.6", status: "configured-unverified" }
+    model: { target: "gpt-5.6-sol", status: "configured-unverified" }
   };
 }

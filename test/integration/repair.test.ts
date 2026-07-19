@@ -66,7 +66,7 @@ function envelope(runId = "run_baseline", snapshotHash = hashB): RunEnvelope {
     manifest_hash: hashA,
     snapshot_hash: snapshotHash,
     fixture_hash: hashC,
-    runner: { adapter: "codex-cli", model: "gpt-5.6" },
+    runner: { adapter: "codex-cli", model: "gpt-5.6-sol" },
     state: "completed",
     started_at: "2026-07-14T08:00:00.000Z",
     ended_at: "2026-07-14T08:01:00.000Z"
@@ -179,7 +179,7 @@ describe("RunDiagnosisService", () => {
     const output = {
       schema: "arena.diagnosis/v1",
       run_id: "run_baseline",
-      model: "gpt-5.6",
+      model: "gpt-5.6-sol",
       observed_failure: "The complete suite failed",
       likely_skill_gap: "The Skill trusted a focused test",
       retry_analysis: "An unchanged retry would repeat the failure",
@@ -194,7 +194,7 @@ describe("RunDiagnosisService", () => {
       "utf8"
     ))).toEqual(output);
     expect(await readFile(verdictPath, "utf8")).toBe(verdictBefore);
-    expect(model.request).toMatchObject({ model: "gpt-5.6", timeout_ms: 5_000 });
+    expect(model.request).toMatchObject({ model: "gpt-5.6-sol", timeout_ms: 5_000 });
     expect(model.request?.schema).toBeDefined();
     expect(model.request?.prompt).toContain('"manifest_id":"repo-false-green-v1"');
     expect(model.request?.prompt).toContain('"ref":"event:0"');
@@ -206,7 +206,7 @@ describe("RunDiagnosisService", () => {
     const { root, service } = await fixture({
       schema: "arena.diagnosis/v1",
       run_id: "run_baseline",
-      model: "gpt-5.6",
+      model: "gpt-5.6-sol",
       observed_failure: "Failure",
       likely_skill_gap: "Gap",
       retry_analysis: "Retry",
@@ -224,7 +224,7 @@ describe("RunDiagnosisService", () => {
     const fixtureValue = await fixture({});
     const lockedSnapshot = snapshot("/private/secret/source");
     const bypass = new BypassModel({
-      schema: "arena.diagnosis/v1", run_id: "run_baseline", model: "gpt-5.6",
+      schema: "arena.diagnosis/v1", run_id: "run_baseline", model: "gpt-5.6-sol",
       observed_failure: "Failure", likely_skill_gap: "Gap", retry_analysis: "Retry",
       suggested_changes: ["Change"], evidence_refs: ["event:999"]
     });
@@ -330,7 +330,7 @@ async function repairFixture(
   const lockedDiagnosis = {
     schema: "arena.diagnosis/v1" as const,
     run_id: baseline.run_id,
-    model: "gpt-5.6" as const,
+    model: "gpt-5.6-sol" as const,
     observed_failure: "The locked full suite failed",
     likely_skill_gap: "The Skill trusted a focused test",
     retry_analysis: "An unchanged retry repeats the failure",
@@ -553,7 +553,7 @@ describe("RepairCoordinator", () => {
     expect(await readFile(path.join(fixture.original.imported_path, "SKILL.md"), "utf8"))
       .toBe(originalBefore);
     expect(fixture.runner.input).toMatchObject({
-      model: "gpt-5.6",
+      model: "gpt-5.6-sol",
       sandbox: "workspace-write",
       timeout_ms: 5_000
     });

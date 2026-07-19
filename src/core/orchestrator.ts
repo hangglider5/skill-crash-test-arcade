@@ -426,7 +426,7 @@ export class RunOrchestrator {
     );
     const snapshot = validatedSnapshot.snapshot;
     const fixtureHash = sha256(canonicalJson(manifest.fixture));
-    const runner = { adapter: "codex-cli" as const, model: "gpt-5.6" as const };
+    const runner = { adapter: "codex-cli" as const, model: "gpt-5.6-sol" as const };
     if (request.expected_lineage.manifest_hash !== loaded.hash
       || request.expected_lineage.fixture_hash !== fixtureHash
       || request.expected_lineage.snapshot_execution_fingerprint
@@ -677,7 +677,7 @@ export class RunOrchestrator {
         run_id: runId,
         cwd: workspace,
         prompt,
-        model: "gpt-5.6",
+        model: "gpt-5.6-sol",
         sandbox: "workspace-write",
         output_schema_path: schemaPath,
         output_path: outputPath,
@@ -723,7 +723,7 @@ export class RunOrchestrator {
 
     await persist(event({
       run_id: runId, seq: nextSeq++, phase: "claim", kind: "agent.claimed",
-      actor: "gpt-5.6", data: { claim }
+      actor: "gpt-5.6-sol", data: { claim }
     }));
     context.envelope = RunEnvelopeSchema.parse({ ...context.envelope, state: "judging" });
     await this.#options.runStore.writeRecord(runId, "run.json", context.envelope);

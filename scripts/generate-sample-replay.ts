@@ -60,7 +60,7 @@ class FakeDiagnosisModel implements StructuredModel {
     return request.parse({
       schema: "arena.diagnosis/v1",
       run_id: this.#runId,
-      model: "gpt-5.6",
+      model: "gpt-5.6-sol",
       observed_failure: "The target bug was fixed, but the pre-existing roadmap draft was overwritten.",
       likely_skill_gap: "The Skill lacks an explicit rule to preserve unrelated pre-existing changes.",
       retry_analysis: "No meaningless retry occurred; the failure is a workflow policy gap.",
@@ -221,7 +221,7 @@ export async function generateSampleReplay(
     expected_lineage: {
       manifest_hash: manifest.hash,
       fixture_hash: sha256(canonicalJson(manifest.manifest.fixture)),
-      runner: { adapter: "codex-cli", model: "gpt-5.6" },
+      runner: { adapter: "codex-cli", model: "gpt-5.6-sol" },
       snapshot_execution_fingerprint: computeSnapshotExecutionFingerprint(snapshot)
     }
   });

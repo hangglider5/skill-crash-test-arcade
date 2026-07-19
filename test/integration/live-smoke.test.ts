@@ -20,7 +20,7 @@ describe("live smoke stage errors", () => {
         ok: true,
         message: "ready"
       })),
-      model: { target: "gpt-5.6", status: "configured-unverified" }
+      model: { target: "gpt-5.6-sol", status: "configured-unverified" }
     })).rejects.toMatchObject({ code: "LIVE_PREFLIGHT_SCHEMA_INVALID" });
   });
 

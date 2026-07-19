@@ -49,7 +49,7 @@ function validContract(): SkillContract {
   return {
     schema: "arena.skill-contract/v1",
     snapshot_hash: hash,
-    model: "gpt-5.6",
+    model: "gpt-5.6-sol",
     promises: [{
       statement: "Preserve repository documentation",
       evidence: "SKILL.md:12",
@@ -108,7 +108,7 @@ function readyHealth(): PreflightResult {
       { id: "git-version", ok: true, message: "Git available" },
       { id: "app-data", ok: true, message: "App data writable" }
     ],
-    model: { target: "gpt-5.6", status: "configured-unverified" }
+    model: { target: "gpt-5.6-sol", status: "configured-unverified" }
   };
 }
 
@@ -121,7 +121,7 @@ function createdRun(): RunEnvelope {
     manifest_hash: hash,
     snapshot_hash: hash,
     fixture_hash: hash,
-    runner: { adapter: "codex-cli", model: "gpt-5.6" },
+    runner: { adapter: "codex-cli", model: "gpt-5.6-sol" },
     state: "created",
     started_at: "2026-07-15T00:00:00.000Z"
   };
@@ -231,7 +231,7 @@ describe("ImportLobby", () => {
     expect(screen.getByText("Codex login")).toBeVisible();
     expect(screen.getByText("Git")).toBeVisible();
     expect(screen.getByText("App data")).toBeVisible();
-    expect(screen.getByText("gpt-5.6")).toBeVisible();
+    expect(screen.getAllByText("gpt-5.6-sol")).toHaveLength(2);
     expect(screen.getByText("configured-unverified")).toBeVisible();
     expect(screen.getByText("Disposable workspace / workspace-write run copy")).toBeVisible();
   });

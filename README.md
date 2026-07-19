@@ -1,6 +1,6 @@
 # Skill Crash-Test Arcade
 
-**Crash-test an Agent Skill before it crashes a real repository.** Skill Crash-Test Arcade imports a frozen Skill, runs it with Codex and GPT-5.6 inside a disposable repository fixture, injects a reproducible failure condition, and locks the outcome with deterministic evidence. After a defeat, GPT-5.6 provides an evidence-linked advisory diagnosis; the user can review a candidate Skill-only repair and explicitly approve the same Quick Match for a controlled rerun.
+**Crash-test an Agent Skill before it crashes a real repository.** Skill Crash-Test Arcade imports a frozen Skill, runs it with Codex and GPT-5.6 Sol inside a disposable repository fixture, injects a reproducible failure condition, and locks the outcome with deterministic evidence. After a defeat, GPT-5.6 Sol provides an evidence-linked advisory diagnosis; the user can review a candidate Skill-only repair and explicitly approve the same Quick Match for a controlled rerun.
 
 ![Skill Crash-Test Arcade Devpost thumbnail](assets/devpost-thumbnail.png)
 
@@ -12,7 +12,7 @@ This is a local-first OpenAI Build Week MVP. The web UI and Core API bind to loo
 - pnpm 10
 - Git
 - Codex CLI installed and authenticated
-- Codex access to the exact `gpt-5.6` model
+- Codex access to the exact `gpt-5.6-sol` model
 
 ## Quick start
 
@@ -35,18 +35,20 @@ pnpm smoke:live
 
 After `pnpm build`, `pnpm start` serves the built web app from Core, prints and opens a randomized tokenized `http://localhost:4317/?token=…` URL, and keeps the server bound to loopback. `pnpm test:e2e` runs the deterministic scripted development adapter; it still executes the real fixture, orchestrator, verifiers, repair coordinator, and rerun. `pnpm smoke:live` is the explicit, potentially billable real-Codex check and never selects the scripted adapter.
 
+Pre-Sol development data used the earlier family alias inside strict `v1` records. This pre-release MVP intentionally treats that local `.arena` state as disposable; archive anything you need, then start with a fresh app-data directory after upgrading. The active model is intentionally fixed in code rather than configured through an environment variable.
+
 ## Architecture
 
 ```mermaid
 flowchart LR
   UI["React Arena UI"] -->|"tokenized loopback API"| Core["Fastify Core"]
   Core --> Import["Read-only Import + locked Snapshot"]
-  Core --> Runner["Codex Runner / GPT-5.6"]
+  Core --> Runner["Codex Runner / GPT-5.6 Sol"]
   Runner --> Workspace["Disposable fixture + Skill copy"]
   Workspace --> Judge["Deterministic Evidence Gate"]
   Judge --> Trace["Append-only Trace + content-addressed artifacts"]
   Trace --> UI
-  Judge --> Diagnosis["GPT-5.6 advisory diagnosis"]
+  Judge --> Diagnosis["GPT-5.6 Sol advisory diagnosis"]
   Diagnosis --> Repair["Writable Skill fork"]
   Repair -->|"explicit approval"| Runner
   Sample["Sanitized Recorded Replay"] --> UI
@@ -54,9 +56,9 @@ flowchart LR
 
 The Runner executes the Skill and emits observable events. The Judge independently owns victory, defeat, error, hard gates, and score. Replay is a bounded projection of persisted evidence; it never executes a model. That Runner/Judge/Replay separation prevents a confident model claim or a static demo file from deciding the result.
 
-### How Codex and GPT-5.6 are used
+### How Codex and GPT-5.6 Sol are used
 
-Codex with GPT-5.6 performs three non-trivial jobs: schema-constrained Skill Contract extraction, execution of the imported Skill against the Arena brief, and generation of an evidence-linked diagnosis/candidate Skill repair. Deterministic verifiers—not GPT-5.6—lock the verdict. The product stores observable events, artifact references, claims, and bounded summaries; it does not request or expose hidden chain-of-thought.
+Codex with GPT-5.6 Sol performs three non-trivial jobs: schema-constrained Skill Contract extraction, execution of the imported Skill against the Arena brief, and generation of an evidence-linked diagnosis/candidate Skill repair. Deterministic verifiers—not GPT-5.6 Sol—lock the verdict. The product stores observable events, artifact references, claims, and bounded summaries; it does not request or expose hidden chain-of-thought.
 
 ## Trust model
 
@@ -92,6 +94,23 @@ SCTA_RUNNER=scripted pnpm dev
 
 `scripted` is honored only when `NODE_ENV` is `development` or `test`. Production always constructs `CodexProcessRunner`, even if `SCTA_RUNNER=scripted` is present.
 
+## Verified GPT-5.6 Sol live proof
+
+The checked-in [proof manifest](proofs/live/gpt-5.6-sol/run_d8e70569-2c6e-4473-904e-0350adddbf9e/proof.json), [sanitized report projection](proofs/live/gpt-5.6-sol/run_d8e70569-2c6e-4473-904e-0350adddbf9e/report.json), and [sanitized Trace headers](proofs/live/gpt-5.6-sol/run_d8e70569-2c6e-4473-904e-0350adddbf9e/trace.sanitized.jsonl) record one authorized production-only `pnpm smoke:live` run:
+
+- Run `run_d8e70569-2c6e-4473-904e-0350adddbf9e`
+- Codex CLI with exact model `gpt-5.6-sol`
+- Locked `victory · 80/100`
+- 5/5 deterministic Verifiers passed and no hard-gate failures
+- 24 sanitized Trace event headers
+- `redaction_complete: true`
+
+The public report intentionally excludes raw event data and artifact bytes. Artifact refs remain integrity identifiers; raw operational Trace and evidence stay local. To publish a later authorized live result after reviewing it:
+
+```bash
+pnpm proof:publish -- .arena/live-smoke/reports/<run-id>.json
+```
+
 ## Local data and reports
 
 ```text
@@ -114,7 +133,7 @@ Browser export is enabled only after an approved controlled comparison and `reda
 
 ## Troubleshooting
 
-- **Preflight blocked:** run `codex --version`, confirm `codex login status`, check Git, and ensure `.arena` is writable. Confirm the account can use GPT-5.6. The Start button remains disabled until all required checks are present and ready.
+- **Preflight blocked:** run `codex --version`, confirm `codex login status`, check Git, and ensure `.arena` is writable. Confirm the account can use GPT-5.6 Sol. The Start button remains disabled until all required checks are present and ready.
 - **Timeout:** a run that times out before a judgeable state is `error`, not `defeat`. Inspect `.arena/runs/<run-id>/trace.jsonl`; increase resources or fix the local Codex setup rather than changing the locked verdict.
 - **Invalid Codex JSONL:** the adapter rejects corrupt or out-of-order output and preserves the partial Trace. Update the Codex CLI, rerun the live smoke, and do not hand-edit Trace records.
 - **Redaction block:** export remains disabled when `redaction_complete` is false or missing. Inspect only local artifacts, remove the sensitive/unsupported evidence source, and rerun; do not bypass the report gate.
@@ -125,7 +144,7 @@ Browser export is enabled only after an approved controlled comparison and `reda
 1. Open the tokenized local URL and choose **Sample**; point out **Recorded Replay**, **LOCKED Snapshot**, and “preservation unspecified.”
 2. Start Dirty Tree as a Live Run and show trace-driven arena activity plus the Evidence Lab.
 3. Reveal the locked `DEFEAT · 58/100`, open `docs/roadmap.md` protected-file evidence, and emphasize that the target tests passed.
-4. Generate the GPT-5.6 **ADVISORY** diagnosis; show that it cannot change the score.
+4. Generate the GPT-5.6 Sol **ADVISORY** diagnosis; show that it cannot change the score.
 5. Create the repair candidate, verify that only `SKILL.md` changed and the Original is unchanged, then explicitly **Approve & Rerun**.
 6. Show the child `VICTORY` and controlled-comparison proof: same Manifest, fixture, Runner, approved parent repair, and changed Skill Snapshot.
 
@@ -138,7 +157,7 @@ Browser export is enabled only after an approved controlled comparison and `reda
 - [ ] Working demo URL or clear local-install instructions
 - [ ] Short demo video showing the complete Dirty Tree defeat-to-victory loop
 - [ ] Screenshots of Import Lobby, 58-point defeat/evidence, Skill-only patch review, and controlled victory proof
-- [ ] OpenAI technology disclosure: Codex CLI, GPT-5.6, schema-constrained outputs, and deterministic judging boundary
+- [ ] OpenAI technology disclosure: Codex CLI, GPT-5.6 Sol, schema-constrained outputs, and deterministic judging boundary
 - [ ] Build Week category/tags and individual team-member details
 - [ ] Trust model, non-malware limitation, privacy/local-first behavior, and original-source guarantee
 - [ ] `pnpm typecheck`, `pnpm test`, `pnpm test:e2e`, `pnpm build`, and built-server smoke results recorded

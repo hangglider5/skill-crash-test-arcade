@@ -39,7 +39,7 @@ function validRunEnvelope(runId: string): RunEnvelope {
     manifest_hash: hashA,
     snapshot_hash: hashB,
     fixture_hash: hashC,
-    runner: { adapter: "codex-cli", model: "gpt-5.6" },
+    runner: { adapter: "codex-cli", model: "gpt-5.6-sol" },
     state: "created",
     started_at: "2026-07-14T08:00:00.000Z"
   };

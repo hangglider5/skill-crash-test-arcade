@@ -33,7 +33,7 @@ describe("runPreflight", () => {
       { command: "git", args: ["--version"] }
     ]);
     expect(result.ok).toBe(true);
-    expect(result.model).toEqual({ target: "gpt-5.6", status: "configured-unverified" });
+    expect(result.model).toEqual({ target: "gpt-5.6-sol", status: "configured-unverified" });
   });
 
   it.each([

@@ -36,7 +36,7 @@ function lobbyHealth(): PreflightResult {
       { id: "git-version", ok: true, message: "ready" },
       { id: "app-data", ok: true, message: "ready" }
     ],
-    model: { target: "gpt-5.6", status: "configured-unverified" }
+    model: { target: "gpt-5.6-sol", status: "configured-unverified" }
   };
 }
 
@@ -77,7 +77,7 @@ function lobbyContract(): SkillContract {
   return {
     schema: "arena.skill-contract/v1",
     snapshot_hash: hash,
-    model: "gpt-5.6",
+    model: "gpt-5.6-sol",
     promises: [],
     preconditions: [],
     expected_artifacts: [],
@@ -95,7 +95,7 @@ function lobbyRun(): RunEnvelope {
     manifest_hash: hash,
     snapshot_hash: hash,
     fixture_hash: hash,
-    runner: { adapter: "codex-cli", model: "gpt-5.6" },
+    runner: { adapter: "codex-cli", model: "gpt-5.6-sol" },
     state: "created",
     started_at: "2026-07-15T00:00:00.000Z"
   };
@@ -118,7 +118,7 @@ function runRecord(): Record<string, unknown> {
     manifest_hash: hash,
     snapshot_hash: hash,
     fixture_hash: hash,
-    runner: { adapter: "codex-cli", model: "gpt-5.6" },
+    runner: { adapter: "codex-cli", model: "gpt-5.6-sol" },
     state: "completed",
     started_at: "2026-07-15T00:00:00.000Z",
     ended_at: "2026-07-15T00:01:00.000Z"
@@ -189,7 +189,7 @@ function sanitizedReport(options: {
     diagnosis: {
       schema: "arena.diagnosis/v1",
       run_id: "run/01",
-      model: "gpt-5.6",
+      model: "gpt-5.6-sol",
       observed_failure: "failure",
       likely_skill_gap: "gap",
       retry_analysis: "retry",
@@ -747,14 +747,14 @@ describe("ArenaApi", () => {
       ["GET /api/health", {
         ok: true,
         checks: [{ id: "app-data", ok: true, message: "ready" }],
-        model: { target: "gpt-5.6", status: "configured-unverified" }
+        model: { target: "gpt-5.6-sol", status: "configured-unverified" }
       }],
       ["POST /api/imports", snapshot],
       [`GET /api/imports/${hash}`, snapshot],
       ["POST /api/contracts", {
         schema: "arena.skill-contract/v1",
         snapshot_hash: hash,
-        model: "gpt-5.6",
+        model: "gpt-5.6-sol",
         promises: [],
         preconditions: [],
         expected_artifacts: [],
@@ -767,7 +767,7 @@ describe("ArenaApi", () => {
       ["POST /api/runs/run%2F01/diagnose", {
         schema: "arena.diagnosis/v1",
         run_id: "run/01",
-        model: "gpt-5.6",
+        model: "gpt-5.6-sol",
         observed_failure: "failure",
         likely_skill_gap: "gap",
         retry_analysis: "retry",

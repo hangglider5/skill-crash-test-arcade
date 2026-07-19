@@ -46,7 +46,7 @@ const PreflightResultSchema = z.object({
     message: z.string()
   }).strict()),
   model: z.object({
-    target: z.literal("gpt-5.6"),
+    target: z.literal("gpt-5.6-sol"),
     status: z.literal("configured-unverified")
   }).strict()
 }).strict();
@@ -134,7 +134,7 @@ export const SanitizedTraceSchema = z.object({
   seq: z.number().int().nonnegative(),
   phase: PhaseSchema,
   kind: TraceKindSchema,
-  actor: z.enum(["arena", "codex", "verifier", "gpt-5.6"]),
+  actor: z.enum(["arena", "codex", "verifier", "gpt-5.6-sol"]),
   span_id: z.string().min(1).optional(),
   artifacts: z.array(ArtifactRefSchema)
 }).strict();

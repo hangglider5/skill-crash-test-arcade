@@ -39,7 +39,7 @@ function validContract(snapshotHash = "b".repeat(64), statement = "Run focused v
   return {
     schema: "arena.skill-contract/v1",
     snapshot_hash: snapshotHash,
-    model: "gpt-5.6",
+    model: "gpt-5.6-sol",
     promises: [{ statement, evidence: "SKILL.md:3", confidence: 0.94 }],
     preconditions: ["Git repository"],
     expected_artifacts: ["test output"],
@@ -89,7 +89,7 @@ describe("Skill Contract Compiler", () => {
     expect(request.prompt).toContain("contract extraction, not a security verdict");
     expect(request.prompt).toContain(snapshot.source_hash);
     expect(request.prompt).toContain("promises, preconditions, expected_artifacts, recovery_rules, and risk_signals");
-    expect(request).toMatchObject({ cwd: snapshot.imported_path, model: "gpt-5.6" });
+    expect(request).toMatchObject({ cwd: snapshot.imported_path, model: "gpt-5.6-sol" });
   });
 
   it("rejects output identity drift, unknown keys, and out-of-range evidence", async () => {
@@ -232,7 +232,7 @@ describe("CodexStructuredModel", () => {
     const result = await model.run({
       cwd: root,
       prompt: "extract",
-      model: "gpt-5.6",
+      model: "gpt-5.6-sol",
       schema: { type: "object", additionalProperties: false },
       parse(value) { return value as { answer: string }; },
       timeout_ms: 1234
@@ -243,7 +243,7 @@ describe("CodexStructuredModel", () => {
     expect(captured[0]).toMatchObject({
       cwd: root,
       prompt: "extract",
-      model: "gpt-5.6",
+      model: "gpt-5.6-sol",
       sandbox: "read-only",
       timeout_ms: 1234
     });
@@ -272,7 +272,7 @@ describe("CodexStructuredModel", () => {
     await expect(model.run({
       cwd: root,
       prompt: "extract",
-      model: "gpt-5.6",
+      model: "gpt-5.6-sol",
       schema: {},
       parse(value) { return value; },
       timeout_ms: 1234
@@ -290,7 +290,7 @@ describe("CodexStructuredModel", () => {
     const runner: AgentRunner = { async run() { throw new Error("must not run"); } };
     const unsafe = new CodexStructuredModel({ runner, tempRoot: root });
     await expect(unsafe.run({
-      cwd: root, prompt: "x", model: "gpt-5.6", schema: {}, parse: (v) => v, timeout_ms: 1
+      cwd: root, prompt: "x", model: "gpt-5.6-sol", schema: {}, parse: (v) => v, timeout_ms: 1
     })).rejects.toThrow(/private|owner|mode|writable/u);
 
     await chmod(root, 0o700);
@@ -306,7 +306,7 @@ describe("CodexStructuredModel", () => {
     };
     const safe = new CodexStructuredModel({ runner: safeRunner, tempRoot: root });
     await expect(safe.run({
-      cwd: root, prompt: "x", model: "gpt-5.6", schema: {}, parse: (v) => v, timeout_ms: 1
+      cwd: root, prompt: "x", model: "gpt-5.6-sol", schema: {}, parse: (v) => v, timeout_ms: 1
     })).resolves.toEqual({});
   });
 
@@ -336,7 +336,7 @@ describe("CodexStructuredModel", () => {
       }
       return id;
     };
-    const request = { cwd: root, prompt: "x", model: "gpt-5.6" as const, schema: {}, parse: (v: unknown) => v, timeout_ms: 1_000 };
+    const request = { cwd: root, prompt: "x", model: "gpt-5.6-sol" as const, schema: {}, parse: (v: unknown) => v, timeout_ms: 1_000 };
     await expect(new CodexStructuredModel({ runner, tempRoot: root, idFactory }).run(request))
       .resolves.toEqual({});
     expect(path.basename(usedSchema)).toBe(".structured-second-id.schema.json");

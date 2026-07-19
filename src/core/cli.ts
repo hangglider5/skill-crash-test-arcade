@@ -413,7 +413,7 @@ export async function createDefaultServerDependencies(
       return {
         manifest_hash: hash,
         fixture_hash: sha256(canonicalJson(manifest.fixture)),
-        runner: { adapter: "codex-cli", model: "gpt-5.6" },
+        runner: { adapter: "codex-cli", model: "gpt-5.6-sol" },
         snapshot_execution_fingerprint: computeSnapshotExecutionFingerprint(snapshot)
       };
     },

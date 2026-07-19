@@ -26,7 +26,7 @@ const LiveSmokePreflightSchema = z.object({
     message: z.string().max(512)
   }).strict()).min(1).max(16),
   model: z.object({
-    target: z.literal("gpt-5.6"),
+    target: z.literal("gpt-5.6-sol"),
     status: z.literal("configured-unverified")
   }).strict()
 }).strict();

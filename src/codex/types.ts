@@ -4,7 +4,7 @@ export interface AgentRunInput {
   run_id: string;
   cwd: string;
   prompt: string;
-  model: "gpt-5.6";
+  model: "gpt-5.6-sol";
   sandbox: "read-only" | "workspace-write";
   output_schema_path: string;
   output_path: string;
@@ -98,7 +98,7 @@ export interface PreflightResult {
   ok: boolean;
   checks: PreflightCheck[];
   model: {
-    target: "gpt-5.6";
+    target: "gpt-5.6-sol";
     status: "configured-unverified";
   };
 }

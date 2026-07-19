@@ -16,6 +16,7 @@
     "test:e2e": "playwright test",
     "test:watch": "vitest",
     "generate:samples": "tsx scripts/generate-sample-replay.ts",
+    "proof:publish": "tsx scripts/publish-live-proof.ts",
     "smoke:built": "tsx scripts/smoke-built-server.ts",
     "smoke:live": "tsx scripts/smoke-live-codex.ts",
     "typecheck": "tsc --noEmit",
