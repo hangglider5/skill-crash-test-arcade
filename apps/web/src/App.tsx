@@ -391,6 +391,10 @@ export function App(): React.JSX.Element {
     );
   }, [sessionToken]);
 
+  useLayoutEffect(() => {
+    window.scrollTo({ top: 0, left: 0, behavior: "auto" });
+  }, [screen, activeRun?.run.run_id]);
+
   if (api === null) {
     return (
       <main className="launch-gate">

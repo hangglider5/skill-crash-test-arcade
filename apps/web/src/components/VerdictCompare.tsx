@@ -90,6 +90,10 @@ function statusLabel(verdict: SanitizedVerdict): string {
   return verdict.status.toUpperCase();
 }
 
+function scoreLabel(verdict: SanitizedVerdict): string {
+  return verdict.status === "error" ? "—" : String(verdict.score);
+}
+
 function sameRunner(left: RunEnvelope, right: RunEnvelope): boolean {
   return left.runner.adapter === right.runner.adapter && left.runner.model === right.runner.model;
 }
@@ -272,21 +276,59 @@ export function VerdictCompare(props: VerdictCompareProps): React.JSX.Element {
 
   return (
     <section aria-labelledby="verdict-title" className={`verdict-compare verdict-${verdict.status}`}>
-      <header className="verdict-hero">
-        <div>
-          <p className="locked-label">Deterministic verdict · LOCKED</p>
-          <h1 id="verdict-title">{statusLabel(verdict)}</h1>
-          {verdict.status === "error"
-            ? <code className="verdict-error-code">{verdict.error.code}</code>
-            : <strong className="verdict-score">{verdict.score} / 100</strong>}
-        </div>
-        <div className="hard-gate-summary">
-          <span>Hard gates</span>
-          {verdict.hard_gate_failures.length === 0
-            ? <strong>No locked failures</strong>
-            : verdict.hard_gate_failures.slice(0, 12).map((gate) => <strong key={gate}>{gate}</strong>)}
-        </div>
-      </header>
+      {controlledComparison && props.child !== undefined ? (
+        <header className="comparison-hero">
+          <div className="comparison-hero-heading">
+            <p className="locked-label">Deterministic verdicts · LINEAGE LOCKED</p>
+            <h1 id="verdict-title">Controlled improvement</h1>
+            <p>Same fixture and Runner; only the explicitly approved Skill repair changed.</p>
+          </div>
+          <div aria-label="Controlled score improvement" className="comparison-score-flow">
+            <div
+              aria-label={`Baseline: ${verdict.status}, ${scoreLabel(verdict)} out of 100`}
+              className="comparison-score baseline-score"
+            >
+              <span>BASELINE</span>
+              <strong>{scoreLabel(verdict)}<small>/100</small></strong>
+              <em>{statusLabel(verdict)}</em>
+              {verdict.hard_gate_failures.slice(0, 1).map((gate) => (
+                <span
+                  aria-label={`Hard gate failure: ${gate}`}
+                  className="comparison-gate"
+                  key={gate}
+                >
+                  {gate.replaceAll("_", " ").toUpperCase()}
+                </span>
+              ))}
+            </div>
+            <span aria-hidden="true" className="comparison-arrow">→</span>
+            <div
+              aria-label={`Repaired Skill: ${props.child.verdict.status}, ${scoreLabel(props.child.verdict)} out of 100`}
+              className="comparison-score repaired-score"
+            >
+              <span>REPAIRED SKILL</span>
+              <strong>{scoreLabel(props.child.verdict)}<small>/100</small></strong>
+              <em>{statusLabel(props.child.verdict)}</em>
+            </div>
+          </div>
+        </header>
+      ) : (
+        <header className="verdict-hero">
+          <div>
+            <p className="locked-label">Deterministic verdict · LOCKED</p>
+            <h1 id="verdict-title">{statusLabel(verdict)}</h1>
+            {verdict.status === "error"
+              ? <code className="verdict-error-code">{verdict.error.code}</code>
+              : <strong className="verdict-score">{verdict.score} / 100</strong>}
+          </div>
+          <div className="hard-gate-summary">
+            <span>Hard gates</span>
+            {verdict.hard_gate_failures.length === 0
+              ? <strong>No locked failures</strong>
+              : verdict.hard_gate_failures.slice(0, 12).map((gate) => <strong key={gate}>{gate}</strong>)}
+          </div>
+        </header>
+      )}
 
       <div className="verdict-layout">
         <div className="verdict-main">

@@ -7,13 +7,14 @@
     "node": ">=22.6.0"
   },
   "scripts": {
+    "demo": "SCTA_RUNNER=scripted pnpm dev",
     "dev": "NODE_ENV=development concurrently -k -n core,web \"pnpm dev:core\" \"pnpm dev:web\"",
     "dev:core": "tsx watch src/core/cli.ts --dev-token dev-token --no-open",
     "dev:web": "vite",
     "build": "tsup src/core/cli.ts --format esm --out-dir dist/core && vite build",
     "start": "node dist/core/cli.js",
     "test": "vitest run",
-    "test:e2e": "playwright test",
+    "test:e2e": "NO_PROXY=127.0.0.1,localhost no_proxy=127.0.0.1,localhost playwright test",
     "test:watch": "vitest",
     "generate:samples": "tsx scripts/generate-sample-replay.ts",
     "proof:publish": "tsx scripts/publish-live-proof.ts",

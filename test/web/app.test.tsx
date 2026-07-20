@@ -471,14 +471,19 @@ describe("App", () => {
   });
 
   it("keeps import, run, and compare shell state in memory", () => {
+    const scrollTo = vi.spyOn(window, "scrollTo");
     window.history.replaceState({}, "", "/?token=arena-secret");
     render(<App />);
+    scrollTo.mockClear();
 
     fireEvent.click(screen.getByRole("button", { name: "Run" }));
+    expect(scrollTo).toHaveBeenLastCalledWith({ top: 0, left: 0, behavior: "auto" });
     expect(screen.getByRole("heading", { name: "Run Monitor" })).toBeVisible();
     fireEvent.click(screen.getByRole("button", { name: "Compare" }));
+    expect(scrollTo).toHaveBeenCalledTimes(2);
     expect(screen.getByRole("heading", { name: "Compare Verdicts" })).toBeVisible();
     fireEvent.click(screen.getByRole("button", { name: "Import" }));
+    expect(scrollTo).toHaveBeenCalledTimes(3);
     expect(screen.getByRole("heading", { name: "Import a Skill" })).toBeVisible();
   });
 

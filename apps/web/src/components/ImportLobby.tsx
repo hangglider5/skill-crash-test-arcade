@@ -443,7 +443,10 @@ export function ImportLobby({
         </div>
         <ProgressRail current={progressStep} />
       </header>
-      <LiveProofCard {...VERIFIED_LIVE_PROOF} />
+      <LiveProofCard
+        {...VERIFIED_LIVE_PROOF}
+        onTrySample={() => chooseSource("sample")}
+      />
       <div className="import-grid">
         <div className="source-column">
           <section aria-labelledby="source-title" className="source-panel">

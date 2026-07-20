@@ -200,9 +200,15 @@ describe("VerdictCompare", () => {
       />
     );
 
-    expect(screen.getByText("DEFEAT")).toBeVisible();
-    expect(screen.getByText("58 / 100")).toBeVisible();
-    expect(screen.getByText("preserve_existing_changes")).toBeVisible();
+    expect(screen.getByRole("heading", { name: "Controlled improvement" })).toBeVisible();
+    expect(screen.getByLabelText("Baseline: defeat, 58 out of 100")).toBeVisible();
+    expect(screen.getByLabelText("Repaired Skill: victory, 91 out of 100")).toBeVisible();
+    expect(screen.getByText(
+      "Same fixture and Runner; only the explicitly approved Skill repair changed."
+    )).toBeVisible();
+    expect(screen.getByLabelText(
+      "Hard gate failure: preserve_existing_changes"
+    )).toHaveTextContent("PRESERVE EXISTING CHANGES");
     expect(screen.getByText("ADVISORY")).toBeVisible();
     expect(screen.getByText("Original unchanged")).toBeVisible();
     expect(screen.getByRole("heading", { name: "Failed verifier evidence" })).toBeVisible();

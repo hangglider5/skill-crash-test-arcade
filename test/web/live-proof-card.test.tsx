@@ -1,5 +1,5 @@
 import { fireEvent, render, screen } from "@testing-library/react";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 
 import { LiveProofCard } from "../../apps/web/src/components/LiveProofCard.js";
 import { VERIFIED_LIVE_PROOF } from "../../apps/web/src/live-proof.js";
@@ -21,7 +21,10 @@ describe("LiveProofCard", () => {
   it("keeps full lineage available and exposes token-free report downloads", () => {
     render(<LiveProofCard {...VERIFIED_LIVE_PROOF} />);
     const { report, proof } = VERIFIED_LIVE_PROOF;
+    const lineage = screen.getByText("Inspect verified proof lineage");
 
+    expect(screen.getByText(proof.run_id)).not.toBeVisible();
+    fireEvent.click(lineage);
     expect(screen.getByLabelText(`Manifest hash ${report.run.manifest_hash}`)).toBeVisible();
     expect(screen.getByLabelText(`Snapshot hash ${report.run.snapshot_hash}`)).toBeVisible();
     expect(screen.getByLabelText(`Fixture hash ${report.run.fixture_hash}`)).toBeVisible();
@@ -34,6 +37,16 @@ describe("LiveProofCard", () => {
     expect(traceLink.getAttribute("href")).toMatch(/^data:application\/x-ndjson/u);
     expect(reportLink.getAttribute("href")).not.toContain("token");
     expect(traceLink.getAttribute("href")).not.toContain("token");
+  });
+
+  it("offers the recorded crash test as the compact primary action", () => {
+    const onTrySample = vi.fn();
+    render(<LiveProofCard {...VERIFIED_LIVE_PROOF} onTrySample={onTrySample} />);
+
+    const action = screen.getByRole("link", { name: "Try the recorded crash test" });
+    expect(action).toHaveAttribute("href", "#source-title");
+    fireEvent.click(action);
+    expect(onTrySample).toHaveBeenCalledTimes(1);
   });
 
   it("reveals only the sanitized Trace projection", () => {

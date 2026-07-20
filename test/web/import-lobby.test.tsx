@@ -178,6 +178,16 @@ async function inspectGit(user: TestUser): Promise<void> {
 }
 
 describe("ImportLobby", () => {
+  it("opens the recorded Sample from the live-proof call to action", async () => {
+    const user = userEvent.setup();
+    render(<ImportLobby api={fakeApi()} onRunStarted={vi.fn()} />);
+
+    await user.click(screen.getByRole("link", { name: "Try the recorded crash test" }));
+
+    expect(screen.getByRole("tab", { name: "Sample" })).toHaveAttribute("aria-selected", "true");
+    expect(screen.getByText("Recorded Replay")).toBeVisible();
+  });
+
   it("inspects before it enables Start Crash Test", async () => {
     const user = userEvent.setup();
     const api = fakeApi();

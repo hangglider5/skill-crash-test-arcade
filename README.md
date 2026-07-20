@@ -6,6 +6,12 @@
 
 This is a local-first OpenAI Build Week MVP. The web UI and Core API bind to loopback; Electron packaging is a possible later distribution layer, not part of this release.
 
+## Supported platforms
+
+- **Submission-verified:** desktop macOS with Node.js, Git, pnpm, and the authenticated Codex CLI.
+- **Expected but not submission-verified:** desktop Linux with the same prerequisites.
+- **Not supported:** Windows, phones, and tablets. The interface remains readable in a narrow browser window, but that responsive layout is not a claim that Codex runs on mobile. The runner, fixture workspace, and loopback Core must stay on the desktop host.
+
 ## Prerequisites
 
 - Node.js 22.6 or newer
@@ -13,6 +19,17 @@ This is a local-first OpenAI Build Week MVP. The web UI and Core API bind to loo
 - Git
 - Codex CLI installed and authenticated
 - Codex access to the exact `gpt-5.6-sol` model
+
+## Judge quick start
+
+The fastest deterministic walkthrough does not spend model credits:
+
+```bash
+pnpm install --frozen-lockfile
+pnpm demo
+```
+
+Open **`http://127.0.0.1:5173/?token=dev-token`**, select **Try the recorded crash test**, inspect the bundled Sample, and start **Dirty Tree Doppelgänger**. This executes the real fixture, trace, deterministic judge, repair review, and controlled rerun with the development-only scripted adapter. The committed live-proof card separately exposes the sanitized evidence from an authorized production Codex + GPT-5.6 Sol run. To exercise Codex itself, use `pnpm dev` without `SCTA_RUNNER=scripted`.
 
 ## Quick start
 
@@ -89,7 +106,7 @@ The **Sample** source tab identifies a bundled `repo-bugfix` Skill and clearly l
 For a deterministic demo/dev run:
 
 ```bash
-SCTA_RUNNER=scripted pnpm dev
+pnpm demo
 ```
 
 `scripted` is honored only when `NODE_ENV` is `development` or `test`. Production always constructs `CodexProcessRunner`, even if `SCTA_RUNNER=scripted` is present.
@@ -153,7 +170,7 @@ Browser export is enabled only after an approved controlled comparison and `reda
 - [ ] Project name and elevator pitch
 - [ ] 3:2 project thumbnail (`assets/devpost-thumbnail.png`)
 - [ ] Complete project story: inspiration, what it does, how it was built, challenges, accomplishments, learnings, and next steps
-- [ ] Public source repository URL and an OSI-compatible repository license
+- [x] Public source repository URL and an OSI-compatible MIT repository license
 - [ ] Working demo URL or clear local-install instructions
 - [ ] Short demo video showing the complete Dirty Tree defeat-to-victory loop
 - [ ] Screenshots of Import Lobby, 58-point defeat/evidence, Skill-only patch review, and controlled victory proof

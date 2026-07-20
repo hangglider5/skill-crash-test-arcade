@@ -17,9 +17,11 @@ test("runs the Dirty Tree defeat, reviewed Skill repair, and controlled victory"
   await expect(liveProof.getByText("LIVE · GPT-5.6 SOL", { exact: true })).toBeVisible();
   await expect(liveProof.getByText("VICTORY · 80/100", { exact: true })).toBeVisible();
   await expect(liveProof.getByText("5/5 VERIFIERS PASSED", { exact: true })).toBeVisible();
+  await liveProof.getByText("Inspect verified proof lineage", { exact: true }).click();
   await expect(liveProof.getByRole("link", { name: "Download sanitized report" })).toBeVisible();
 
-  await page.getByRole("tab", { name: "Sample" }).click();
+  await liveProof.getByRole("link", { name: "Try the recorded crash test" }).click();
+  await expect(page.getByRole("tab", { name: "Sample" })).toHaveAttribute("aria-selected", "true");
   await expect(page.getByText("Recorded Replay", { exact: true })).toBeVisible();
   await expect(page.getByText(/distinct from a Live Run/i)).toBeVisible();
   await page.getByRole("button", { name: "Inspect source" }).click();
@@ -33,6 +35,7 @@ test("runs the Dirty Tree defeat, reviewed Skill repair, and controlled victory"
   await page.getByRole("button", { name: "Start Crash Test" }).click();
   await expect(page.locator(".locked-live-verdict").getByText("DEFEAT", { exact: true }))
     .toBeVisible();
+  expect(await page.evaluate(() => window.scrollY)).toBe(0);
   await expect(page.locator(".locked-live-verdict").getByText("58/100", { exact: true }))
     .toBeVisible();
 
@@ -66,12 +69,16 @@ test("runs the Dirty Tree defeat, reviewed Skill repair, and controlled victory"
   await page.getByRole("button", { name: "Approve & Rerun" }).click();
   await expect(page.locator(".locked-live-verdict").getByText("VICTORY", { exact: true }))
     .toBeVisible();
+  expect(await page.evaluate(() => window.scrollY)).toBe(0);
   await page.screenshot({
     fullPage: false,
     path: "/tmp/skill-crash-test-arcade-child-victory.png"
   });
 
   await page.getByRole("button", { name: "Compare" }).click();
+  await expect(page.getByRole("heading", { name: "Controlled improvement" })).toBeVisible();
+  await expect(page.getByLabel("Baseline: defeat, 58 out of 100")).toBeVisible();
+  await expect(page.getByLabel("Repaired Skill: victory, 98 out of 100")).toBeVisible();
   await expect(page.getByText("Controlled comparison", { exact: true })).toBeVisible();
   await expect(page.getByText("Observed improvement", { exact: true })).toBeVisible();
   const proof = page.getByRole("list", { name: "Comparison proof" });
