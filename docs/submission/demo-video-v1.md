@@ -1,6 +1,6 @@
 # Demo Video v1 — Narration and Shot List
 
-Target: **2:35–2:45**, English narration, 16:9 landscape, burned-in English captions, and no unlicensed music. The official submission must remain under three minutes.
+Target: **2:35–2:45**, English narration (347 words), 16:9 landscape, burned-in English captions, and no unlicensed music. The official submission must remain under three minutes.
 
 The automated UI master comes from:
 
@@ -8,7 +8,7 @@ The automated UI master comes from:
 pnpm demo:record
 ```
 
-Use the generated MP4 as the primary evidence. VideoZero may supply the short 2D hook and architecture outro; HeyGen may supply an optional presenter intro, but neither should replace the real product recording.
+Use the narration-paced MP4 as the primary evidence. VideoZero may supply the short 2D hook and architecture outro; HeyGen may supply an optional presenter intro, but neither should replace the real product recording.
 
 ## English narration v1
 

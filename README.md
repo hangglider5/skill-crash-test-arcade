@@ -39,7 +39,7 @@ Create a deterministic, silent 16:9 product walkthrough:
 pnpm demo:record
 ```
 
-The recorder starts the local scripted demo, pauses on the important evidence, completes the 58-to-98 repair loop, and writes ignored editing assets to `artifacts/demo/`:
+The recorder starts the local scripted demo, pauses on the important evidence at narration-friendly pacing, completes the 58-to-98 repair loop, and writes ignored editing assets to `artifacts/demo/`:
 
 - `skill-crash-test-arcade-demo-silent.webm` — original Playwright capture at 1600×900;
 - `skill-crash-test-arcade-demo-silent-1080p.mp4` — H.264 1920×1080 editing master when FFmpeg is installed.

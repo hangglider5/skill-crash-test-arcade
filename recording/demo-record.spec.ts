@@ -9,9 +9,12 @@ const execFileAsync = promisify(execFile);
 const outputDirectory = resolve("artifacts/demo");
 const webmPath = resolve(outputDirectory, "skill-crash-test-arcade-demo-silent.webm");
 const mp4Path = resolve(outputDirectory, "skill-crash-test-arcade-demo-silent-1080p.mp4");
+const narrationPacing = 1.6;
 
 async function hold(page: Page, milliseconds: number): Promise<void> {
-  await page.waitForTimeout(milliseconds);
+  // Leave enough reading room for the 2:40 submission narration without
+  // slowing down browser motion in the editor.
+  await page.waitForTimeout(milliseconds * narrationPacing);
 }
 
 async function spotlight(
