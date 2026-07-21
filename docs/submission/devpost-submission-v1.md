@@ -89,7 +89,7 @@ Live execution uses the authenticated Codex CLI with the exact `gpt-5.6-sol`
 model. For judges, `pnpm demo` uses a scripted Runner that consumes no model
 credits while exercising the real fixture, Trace, verifiers, repair review, and
 rerun. A sanitized Live Proof separately records an authorized production Codex
-+ GPT-5.6 Sol run with 5/5 verifiers passed.
+and GPT-5.6 Sol run with 5/5 verifiers passed.
 
 ### How Codex and GPT-5.6 helped
 
