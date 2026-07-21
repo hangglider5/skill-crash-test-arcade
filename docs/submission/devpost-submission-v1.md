@@ -34,8 +34,7 @@ TODO: public YouTube URL
 
 ### Codex feedback session
 
-TODO: `/feedback` Session ID for the Codex task containing the majority of the
-core implementation.
+`019f5f2e-2742-7022-9f71-1cba590a4321`
 
 ## Project story
 

@@ -37,8 +37,8 @@
     <text y="375" fill="#cbd5e1" font-family="Inter, Helvetica, Arial, sans-serif" font-size="34" font-weight="450">Crash-test an Agent Skill before it touches real work.</text>
   </g>
 
-  <g transform="translate(146 914)">
-    <rect width="458" height="58" rx="29" fill="#10233b" stroke="#0e7490"/>
-    <text x="229" y="38" text-anchor="middle" fill="#a5f3fc" font-family="Inter, Helvetica, Arial, sans-serif" font-size="23" font-weight="650" letter-spacing="2">DEFEAT → DIAGNOSE → REPAIR → VICTORY</text>
+  <g transform="translate(146 840)">
+    <rect width="660" height="58" rx="29" fill="#10233b" stroke="#0e7490"/>
+    <text x="330" y="38" text-anchor="middle" fill="#a5f3fc" font-family="Inter, Helvetica, Arial, sans-serif" font-size="23" font-weight="650" letter-spacing="2">DEFEAT → DIAGNOSE → REPAIR → VICTORY</text>
   </g>
 </svg>

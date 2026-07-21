@@ -38,7 +38,7 @@
     <g transform="translate(556)">
       <rect width="454" height="230" rx="24" fill="#0c1528" stroke="#8b5cf6" stroke-width="2"/>
       <text x="40" y="62" fill="#c4b5fd" font-size="20" font-weight="700" letter-spacing="4">02 · VERIFY</text>
-      <text x="40" y="125" fill="#f4f8ff" font-size="37" font-weight="750">DETERMINISTIC JUDGE</text>
+      <text x="40" y="125" fill="#f4f8ff" font-size="31" font-weight="750">DETERMINISTIC JUDGE</text>
       <text x="40" y="176" fill="#a8b6ca" font-size="23">Hard gates + locked evidence</text>
     </g>
     <text x="1052" y="135" fill="#c4b5fd" font-size="55" font-weight="500">→</text>
