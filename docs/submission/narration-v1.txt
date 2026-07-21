@@ -1,0 +1,23 @@
+A coding agent can fix the requested bug and still damage the repository. A passing test is not the same as a trustworthy workflow. Skill Crash-Test Arcade tests the Skill before the Skill touches real work.
+
+This is a local-first developer tool built for OpenAI Build Week. We import a Skill as a read-only, content-addressed snapshot. The original source remains unchanged.
+
+The checked-in Live Proof records an authorized production Codex run with GPT five point six Sol. The public projection is sanitized, redaction-complete, and backed by deterministic verifier evidence.
+
+For the demo, we select the bundled recorded Sample, inspect its contract, and match it against Dirty Tree Doppelgänger. The fixture already contains an unrelated change that must survive.
+
+Codex executes the Skill inside a disposable workspace. GPT five point six Sol helps extract the contract and perform the task, while the Arena records observable Trace events.
+
+The Skill fixes the target bug and its focused checks pass. But it overwrites docs slash roadmap dot M D. Independent verifiers lock a defeat at fifty-eight out of one hundred. The model cannot grade itself or rewrite this verdict.
+
+GPT five point six Sol now diagnoses the locked evidence. It finds no meaningless retry loop; the failure is a policy gap: the Skill never promised to preserve unrelated pre-existing changes.
+
+The proposed repair changes only Skill dot M D inside a private fork. The imported original stays read-only, and nothing is committed or pushed. A human must review and explicitly approve the rerun.
+
+The repaired Skill runs against the same manifest, fixture, runner configuration, and parent run group. This time every protected change survives. The deterministic score rises from fifty-eight to ninety-eight, and the outcome becomes victory.
+
+This comparison is observed improvement, not a causal claim. Its lineage proves exactly what stayed fixed and what changed: only the approved Skill snapshot.
+
+Codex accelerated the full-stack implementation, test design, browser debugging, and submission polish. Our key product decision was to separate the Codex runner, deterministic judge, and evidence replay.
+
+Skill Crash-Test Arcade turns Agent Skill reliability into something visible, reproducible, and fun to test—before a real repository pays the price.

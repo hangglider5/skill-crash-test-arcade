@@ -1,0 +1,44 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1920" height="1080" viewBox="0 0 1920 1080">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#06101f"/>
+      <stop offset="0.58" stop-color="#08101f"/>
+      <stop offset="1" stop-color="#151135"/>
+    </linearGradient>
+    <radialGradient id="glow" cx="78%" cy="38%" r="58%">
+      <stop offset="0" stop-color="#7c3aed" stop-opacity="0.28"/>
+      <stop offset="0.48" stop-color="#22d3ee" stop-opacity="0.10"/>
+      <stop offset="1" stop-color="#08101f" stop-opacity="0"/>
+    </radialGradient>
+    <pattern id="grid" width="64" height="64" patternUnits="userSpaceOnUse">
+      <path d="M64 0H0V64" fill="none" stroke="#67e8f9" stroke-opacity="0.055" stroke-width="1"/>
+    </pattern>
+    <filter id="cyanGlow" x="-40%" y="-40%" width="180%" height="180%">
+      <feGaussianBlur stdDeviation="18" result="blur"/>
+      <feMerge><feMergeNode in="blur"/><feMergeNode in="SourceGraphic"/></feMerge>
+    </filter>
+  </defs>
+  <rect width="1920" height="1080" fill="url(#bg)"/>
+  <rect width="1920" height="1080" fill="url(#glow)"/>
+  <rect width="1920" height="1080" fill="url(#grid)"/>
+  <path d="M0 150H1280" stroke="#22d3ee" stroke-opacity="0.35" stroke-width="2"/>
+  <path d="M710 930H1920" stroke="#8b5cf6" stroke-opacity="0.45" stroke-width="2"/>
+
+  <g transform="translate(146 114)">
+    <rect width="66" height="66" rx="16" fill="#0c1528" stroke="#22d3ee" stroke-width="2"/>
+    <text x="33" y="45" text-anchor="middle" fill="#67e8f9" font-family="Inter, Helvetica, Arial, sans-serif" font-size="34" font-weight="700">S</text>
+    <text x="92" y="44" fill="#e5eefc" font-family="Inter, Helvetica, Arial, sans-serif" font-size="30" font-weight="650">SKILL CRASH-TEST ARCADE</text>
+  </g>
+
+  <g transform="translate(146 332)">
+    <text fill="#91a0b8" font-family="Inter, Helvetica, Arial, sans-serif" font-size="26" font-weight="650" letter-spacing="5">OPENAI BUILD WEEK · DEVELOPER TOOLS</text>
+    <text y="145" fill="#f4f8ff" font-family="Inter, Helvetica, Arial, sans-serif" font-size="112" font-weight="800" letter-spacing="-4">THE BUG IS FIXED.</text>
+    <text y="276" fill="#67e8f9" font-family="Inter, Helvetica, Arial, sans-serif" font-size="112" font-weight="800" letter-spacing="-4" filter="url(#cyanGlow)">THE REPO ISN’T.</text>
+    <text y="375" fill="#cbd5e1" font-family="Inter, Helvetica, Arial, sans-serif" font-size="34" font-weight="450">Crash-test an Agent Skill before it touches real work.</text>
+  </g>
+
+  <g transform="translate(146 914)">
+    <rect width="458" height="58" rx="29" fill="#10233b" stroke="#0e7490"/>
+    <text x="229" y="38" text-anchor="middle" fill="#a5f3fc" font-family="Inter, Helvetica, Arial, sans-serif" font-size="23" font-weight="650" letter-spacing="2">DEFEAT → DIAGNOSE → REPAIR → VICTORY</text>
+  </g>
+</svg>

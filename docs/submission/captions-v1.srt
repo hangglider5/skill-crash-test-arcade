@@ -1,0 +1,141 @@
+1
+00:00:00,000 --> 00:00:05,579
+A coding agent can fix the requested bug
+and still damage the repository.
+
+2
+00:00:05,579 --> 00:00:10,300
+A passing test is not the same
+as a trustworthy workflow.
+
+3
+00:00:10,300 --> 00:00:15,450
+Skill Crash-Test Arcade tests the Skill
+before the Skill touches real work.
+
+4
+00:00:15,450 --> 00:00:20,171
+This is a local-first developer tool
+built for OpenAI Build Week.
+
+5
+00:00:20,171 --> 00:00:24,033
+We import a Skill as a read-only,
+content-addressed snapshot.
+
+6
+00:00:24,033 --> 00:00:26,179
+The original source remains unchanged.
+
+7
+00:00:26,179 --> 00:00:33,046
+The checked-in Live Proof records an authorized production
+Codex run with GPT-5.6 Sol.
+
+8
+00:00:33,046 --> 00:00:38,196
+The public projection is sanitized, redaction-complete,
+and backed by deterministic verifier evidence.
+
+9
+00:00:38,196 --> 00:00:46,350
+For the demo, we select the bundled recorded Sample, inspect
+its contract, and match it against Dirty Tree Doppelgänger.
+
+10
+00:00:46,350 --> 00:00:50,641
+The fixture already contains an unrelated change
+that must survive.
+
+11
+00:00:50,641 --> 00:00:54,075
+Codex executes the Skill
+inside a disposable workspace.
+
+12
+00:00:54,075 --> 00:01:02,658
+GPT-5.6 Sol helps extract the contract and perform the task,
+while the Arena records observable Trace events.
+
+13
+00:01:02,658 --> 00:01:07,379
+The Skill fixes the target bug
+and its focused checks pass.
+
+14
+00:01:07,379 --> 00:01:11,241
+But it overwrites docs/roadmap.md.
+
+15
+00:01:11,241 --> 00:01:15,962
+Independent verifiers lock a defeat
+at fifty-eight out of one hundred.
+
+16
+00:01:15,962 --> 00:01:19,824
+The model cannot grade itself
+or rewrite this verdict.
+
+17
+00:01:19,824 --> 00:01:24,116
+GPT-5.6 Sol now diagnoses
+the locked evidence.
+
+18
+00:01:24,116 --> 00:01:33,128
+It finds no meaningless retry loop; the failure is a policy gap:
+the Skill never promised to preserve unrelated pre-existing changes.
+
+19
+00:01:33,128 --> 00:01:38,707
+The proposed repair changes only SKILL.md
+inside a private fork.
+
+20
+00:01:38,707 --> 00:01:43,428
+The imported original stays read-only,
+and nothing is committed or pushed.
+
+21
+00:01:43,428 --> 00:01:47,291
+A human must review
+and explicitly approve the rerun.
+
+22
+00:01:47,291 --> 00:01:53,728
+The repaired Skill runs against the same manifest, fixture,
+runner configuration, and parent run group.
+
+23
+00:01:53,728 --> 00:01:56,303
+This time every protected change survives.
+
+24
+00:01:56,303 --> 00:02:01,882
+The deterministic score rises from fifty-eight to ninety-eight,
+and the outcome becomes victory.
+
+25
+00:02:01,882 --> 00:02:05,745
+This comparison is observed improvement,
+not a causal claim.
+
+26
+00:02:05,745 --> 00:02:12,182
+Its lineage proves exactly what stayed fixed and what changed:
+only the approved Skill snapshot.
+
+27
+00:02:12,182 --> 00:02:17,332
+Codex accelerated the full-stack implementation,
+test design, browser debugging, and submission polish.
+
+28
+00:02:17,332 --> 00:02:23,770
+Our key product decision was to separate the Codex runner,
+deterministic judge, and evidence replay.
+
+29
+00:02:23,770 --> 00:02:32,782
+Skill Crash-Test Arcade turns Agent Skill reliability into something visible,
+reproducible, and fun to test—before a real repository pays the price.

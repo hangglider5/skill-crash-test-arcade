@@ -10,6 +10,9 @@ pnpm demo:record
 
 Use the narration-paced MP4 as the primary evidence. VideoZero may supply the short 2D hook and architecture outro; HeyGen may supply an optional presenter intro, but neither should replace the real product recording.
 
+The assembled first review cut and its editable source manifest are documented
+in [`video-asset-package.md`](video-asset-package.md).
+
 ## English narration v1
 
 > A coding agent can fix the requested bug and still damage the repository. A passing test is not the same as a trustworthy workflow. Skill Crash-Test Arcade tests the Skill before the Skill touches real work.

@@ -1,0 +1,60 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1920" height="1080" viewBox="0 0 1920 1080">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#06101f"/>
+      <stop offset="0.58" stop-color="#08101f"/>
+      <stop offset="1" stop-color="#151135"/>
+    </linearGradient>
+    <radialGradient id="glow" cx="50%" cy="55%" r="62%">
+      <stop offset="0" stop-color="#22d3ee" stop-opacity="0.10"/>
+      <stop offset="0.58" stop-color="#7c3aed" stop-opacity="0.08"/>
+      <stop offset="1" stop-color="#08101f" stop-opacity="0"/>
+    </radialGradient>
+    <pattern id="grid" width="64" height="64" patternUnits="userSpaceOnUse">
+      <path d="M64 0H0V64" fill="none" stroke="#67e8f9" stroke-opacity="0.05" stroke-width="1"/>
+    </pattern>
+  </defs>
+  <rect width="1920" height="1080" fill="url(#bg)"/>
+  <rect width="1920" height="1080" fill="url(#glow)"/>
+  <rect width="1920" height="1080" fill="url(#grid)"/>
+
+  <g transform="translate(130 92)">
+    <rect width="58" height="58" rx="14" fill="#0c1528" stroke="#22d3ee" stroke-width="2"/>
+    <text x="29" y="40" text-anchor="middle" fill="#67e8f9" font-family="Inter, Helvetica, Arial, sans-serif" font-size="30" font-weight="700">S</text>
+    <text x="82" y="39" fill="#e5eefc" font-family="Inter, Helvetica, Arial, sans-serif" font-size="27" font-weight="650">SKILL CRASH-TEST ARCADE</text>
+  </g>
+
+  <text x="960" y="270" text-anchor="middle" fill="#f4f8ff" font-family="Inter, Helvetica, Arial, sans-serif" font-size="74" font-weight="800" letter-spacing="-2">TRUST IS AN ARCHITECTURE.</text>
+  <text x="960" y="326" text-anchor="middle" fill="#91a0b8" font-family="Inter, Helvetica, Arial, sans-serif" font-size="27">The model performs the work. Deterministic evidence owns the verdict.</text>
+
+  <g transform="translate(146 430)" font-family="Inter, Helvetica, Arial, sans-serif">
+    <g>
+      <rect width="454" height="230" rx="24" fill="#0c1528" stroke="#22d3ee" stroke-width="2"/>
+      <text x="40" y="62" fill="#67e8f9" font-size="20" font-weight="700" letter-spacing="4">01 · EXECUTE</text>
+      <text x="40" y="125" fill="#f4f8ff" font-size="39" font-weight="750">CODEX RUNNER</text>
+      <text x="40" y="176" fill="#a8b6ca" font-size="23">GPT-5.6 Sol + disposable fixture</text>
+    </g>
+    <text x="496" y="135" fill="#67e8f9" font-size="55" font-weight="500">→</text>
+    <g transform="translate(556)">
+      <rect width="454" height="230" rx="24" fill="#0c1528" stroke="#8b5cf6" stroke-width="2"/>
+      <text x="40" y="62" fill="#c4b5fd" font-size="20" font-weight="700" letter-spacing="4">02 · VERIFY</text>
+      <text x="40" y="125" fill="#f4f8ff" font-size="37" font-weight="750">DETERMINISTIC JUDGE</text>
+      <text x="40" y="176" fill="#a8b6ca" font-size="23">Hard gates + locked evidence</text>
+    </g>
+    <text x="1052" y="135" fill="#c4b5fd" font-size="55" font-weight="500">→</text>
+    <g transform="translate(1112)">
+      <rect width="454" height="230" rx="24" fill="#0c1528" stroke="#22d3ee" stroke-width="2"/>
+      <text x="40" y="62" fill="#67e8f9" font-size="20" font-weight="700" letter-spacing="4">03 · PROVE</text>
+      <text x="40" y="125" fill="#f4f8ff" font-size="39" font-weight="750">EVIDENCE REPLAY</text>
+      <text x="40" y="176" fill="#a8b6ca" font-size="23">Bounded, reproducible lineage</text>
+    </g>
+  </g>
+
+  <g transform="translate(146 776)" font-family="Inter, Helvetica, Arial, sans-serif">
+    <text fill="#86efac" font-size="26" font-weight="700">58 DEFEAT</text>
+    <text x="175" fill="#8291a8" font-size="26">→ reviewed Skill-only repair →</text>
+    <text x="640" fill="#86efac" font-size="26" font-weight="700">98 VICTORY</text>
+    <text y="92" fill="#e5eefc" font-size="31" font-weight="650">Local-first · Original unchanged · Human-approved rerun</text>
+    <text y="164" fill="#67e8f9" font-size="27">github.com/hangglider5/skill-crash-test-arcade</text>
+  </g>
+</svg>
