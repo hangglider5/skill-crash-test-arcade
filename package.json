@@ -8,6 +8,7 @@
   },
   "scripts": {
     "demo": "SCTA_RUNNER=scripted pnpm dev",
+    "demo:record": "NO_PROXY=127.0.0.1,localhost no_proxy=127.0.0.1,localhost playwright test --config playwright.demo.config.ts",
     "dev": "NODE_ENV=development concurrently -k -n core,web \"pnpm dev:core\" \"pnpm dev:web\"",
     "dev:core": "tsx watch src/core/cli.ts --dev-token dev-token --no-open",
     "dev:web": "vite",

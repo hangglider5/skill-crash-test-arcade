@@ -31,6 +31,21 @@ pnpm demo
 
 Open **`http://127.0.0.1:5173/?token=dev-token`**, select **Try the recorded crash test**, inspect the bundled Sample, and start **Dirty Tree Doppelgänger**. This executes the real fixture, trace, deterministic judge, repair review, and controlled rerun with the development-only scripted adapter. The committed live-proof card separately exposes the sanitized evidence from an authorized production Codex + GPT-5.6 Sol run. To exercise Codex itself, use `pnpm dev` without `SCTA_RUNNER=scripted`.
 
+## Record the submission demo
+
+Create a deterministic, silent 16:9 product walkthrough:
+
+```bash
+pnpm demo:record
+```
+
+The recorder starts the local scripted demo, pauses on the important evidence, completes the 58-to-98 repair loop, and writes ignored editing assets to `artifacts/demo/`:
+
+- `skill-crash-test-arcade-demo-silent.webm` — original Playwright capture at 1600×900;
+- `skill-crash-test-arcade-demo-silent-1080p.mp4` — H.264 1920×1080 editing master when FFmpeg is installed.
+
+The capture intentionally has no audio. Add the approved English narration and captions during editing. The first narration draft and shot list are in [`docs/submission/demo-video-v1.md`](docs/submission/demo-video-v1.md).
+
 ## Quick start
 
 ```bash

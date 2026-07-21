@@ -19,5 +19,5 @@
     "jsx": "react-jsx",
     "types": ["node", "vitest/globals"]
   },
-  "include": ["src", "apps", "test", "e2e", "*.ts"]
+  "include": ["src", "apps", "test", "e2e", "recording", "*.ts"]
 }
