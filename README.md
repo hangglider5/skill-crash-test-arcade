@@ -171,7 +171,9 @@ Browser export is enabled only after an approved controlled comparison and `reda
 - **Redaction block:** export remains disabled when `redaction_complete` is false or missing. Inspect only local artifacts, remove the sensitive/unsupported evidence source, and rerun; do not bypass the report gate.
 - **Playwright cannot bind loopback:** run `pnpm test:e2e` outside a filesystem/network sandbox that denies local server sockets, and install Chromium once with `pnpm exec playwright install chromium`.
 
-## OpenAI Build Week demo (2:43.6)
+## OpenAI Build Week demo (2:37.7)
+
+Published demo: https://youtu.be/O-eEYYi42qc
 
 1. Open the tokenized local URL and choose **Sample**; point out **Recorded Replay**, **LOCKED Snapshot**, and “preservation unspecified.”
 2. Start Dirty Tree as a Live Run and show trace-driven arena activity plus the Evidence Lab.
@@ -194,7 +196,7 @@ Browser export is enabled only after an approved controlled comparison and `reda
 - [x] Trust model, non-malware limitation, privacy/local-first behavior, and original-source guarantee
 - [x] `pnpm typecheck`, `pnpm test`, `pnpm test:e2e`, `pnpm build`, and built-server smoke results recorded
 - [x] One authorized `pnpm smoke:live` result with run ID, terminal status/score, Trace path, and sanitized report path
-- [ ] Captioned demo uploaded publicly and checked after YouTube finishes 1080p processing
+- [x] Captioned demo uploaded and verified from a signed-out browser after YouTube finished 1080p processing
 - [ ] Submission preview checked for working links, readable media, correct attribution, and no tokens/local paths/secrets
 
 ## Current boundary and next steps

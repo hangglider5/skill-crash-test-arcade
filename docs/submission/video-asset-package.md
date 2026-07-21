@@ -1,17 +1,24 @@
-# Final Video Asset Package v2
+# Final Video Asset Package v3
 
-This package is the Visual Arcade submission cut for OpenAI Build Week. It was
-rebuilt from the latest 1080p product master, with the narration and caption
-clock restored to the approved 2:43.6 timeline. Generated binary assets live
+Published demo: https://youtu.be/O-eEYYi42qc
+
+This package is the motion-polished Visual Arcade submission cut for OpenAI
+Build Week. It preserves the approved narration and caption clock, keeps the
+final sentence on the controlled comparison, and replaces the long silent tail
+with a five-second animated architecture sign-off. Generated binary assets live
 under ignored `artifacts/submission/`; editable source copy and vector cards
 remain in the repository.
 
 ## Review cuts
 
 - `artifacts/submission/video/skill-crash-test-arcade-final-preview-captioned.mp4`
-  — 2:43.6, 1920×1080 H.264/AAC, reference English narration, burned captions.
+  — 2:37.72, 1920×1080 H.264/AAC, reference English narration, burned captions.
 - `artifacts/submission/video/skill-crash-test-arcade-final-preview-clean.mp4`
   — identical picture and narration without burned captions.
+
+Versioned copies are retained as
+`skill-crash-test-arcade-final-motion-v3-captioned.mp4` and
+`skill-crash-test-arcade-final-motion-v3-clean.mp4`.
 
 The captioned file is the submission-ready cut after final audio, synchronization,
 safe-area, and decode review. The clean file remains the editing master if the
@@ -65,15 +72,16 @@ continue using the existing 3:2 `assets/devpost-thumbnail.png`.
    approval, or controlled-comparison evidence.
 4. Confirm no filesystem path, token, private Trace body, or unpublished
    artifact appears.
-5. Upload the captioned MP4 as a **public** YouTube video and watch the processed
-   1080p version once before pasting its URL into Devpost.
+5. Upload the captioned MP4 to YouTube and watch the processed 1080p version
+   from a signed-out browser before pasting its URL into Devpost. Completed for
+   https://youtu.be/O-eEYYi42qc.
 
-## Media verification recorded for v2
+## Media verification recorded for v3
 
-- Duration: 163.6 seconds (2:43.6), under the three-minute limit.
+- Duration: 157.72 seconds (2:37.72), under the three-minute limit.
 - Video: H.264, 1920×1080, 25 fps, `yuv420p`.
 - Audio: AAC, 48 kHz, mono.
 - Full decode check: passed with no invalid packets or broken frames.
-- Visual samples checked at narration-critical beats: defeat arena and evidence,
-  repair review, victory score reveal, controlled comparison, final line, and
-  architecture outro. Caption line wrapping and safe-area placement also passed.
+- Visual samples checked at the motion title, defeat arena and evidence, repair
+  review, victory score reveal, final controlled-comparison line, clean outro,
+  and fade to black. Caption wrapping and safe-area placement also passed.

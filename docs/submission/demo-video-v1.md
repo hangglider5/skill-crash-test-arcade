@@ -1,6 +1,8 @@
-# Final Demo Video v2 — Narration and Shot List
+# Final Demo Video v3 — Narration and Shot List
 
-Final runtime: **2:43.6**, English narration (347 words), 1920×1080 landscape at 25 fps, burned-in English captions, and no unlicensed music. The official submission remains under three minutes.
+Final runtime: **2:37.72**, English narration (347 words), 1920×1080 landscape at 25 fps, burned-in English captions, and no unlicensed music. The official submission remains under three minutes.
+
+Published demo: https://youtu.be/O-eEYYi42qc
 
 The automated UI master comes from:
 
@@ -8,9 +10,9 @@ The automated UI master comes from:
 pnpm demo:record
 ```
 
-Use the narration-paced MP4 as the primary evidence. An eight-second generated title card and a twelve-second architecture card bookend the real product recording; the product remains the majority of the finished cut.
+Use the narration-paced MP4 as the primary evidence. An eight-second motion title card and a five-second motion architecture card bookend the real product recording; the product remains the majority of the finished cut.
 
-The assembled Visual Arcade v2 cut and its editable source manifest are documented
+The assembled Visual Arcade v3 cut and its editable source manifest are documented
 in [`video-asset-package.md`](video-asset-package.md).
 
 ## English narration v1
@@ -53,8 +55,8 @@ in [`video-asset-package.md`](video-asset-package.md).
 | 1:28–1:44 | Click **Diagnose locked defeat** | Hold Observed, Likely Skill gap, and Retry analysis. | “GPT-5.6 Sol now diagnoses…” |
 | 1:44–1:59 | Click **Create repair candidate** | Show `Changed paths: SKILL.md`, patch, and `Original unchanged`. | “The proposed repair changes only…” |
 | 1:59–2:12 | Explicitly click **Approve & Rerun**; Run Monitor reaches `VICTORY · 98/100` | Preserve the approval click and the returned victory screen. | “The repaired Skill runs…” |
-| 2:12–2:30 | Compare hero: `58 → 98`, then controlled-comparison proof | Show same Manifest, fixture, Runner, parent lineage, and changed Skill Snapshot. | “This comparison is observed improvement…” |
-| 2:30–2:43.6 | Architecture outro: `CODEX RUNNER → DETERMINISTIC JUDGE → EVIDENCE REPLAY` | Hold the repository URL and `Local-first · Original unchanged` through the end. | “Codex accelerated…” through final line. |
+| 2:12–2:32.7 | Compare hero: `58 → 98`, then controlled-comparison proof | Show same Manifest, fixture, Runner, parent lineage, and changed Skill Snapshot through the final narration line. | “This comparison is observed improvement…” |
+| 2:32.7–2:37.7 | Motion architecture outro: `CODEX RUNNER → DETERMINISTIC JUDGE → EVIDENCE REPLAY` | Reveal the repository URL, then fade cleanly to black. | Narration complete; visual sign-off. |
 
 ## Capture checklist
 
@@ -68,4 +70,4 @@ in [`video-asset-package.md`](video-asset-package.md).
 - [x] Do not use copyrighted music or third-party brand footage without permission.
 - [x] Export H.264, 1920×1080 at 25 fps, with AAC audio.
 - [x] Keep the final duration below 2:50 to preserve a safety margin under the three-minute limit.
-- [ ] Watch the uploaded YouTube version once at 1080p with captions enabled.
+- [x] Watch the uploaded YouTube version once at 1080p from a signed-out browser.

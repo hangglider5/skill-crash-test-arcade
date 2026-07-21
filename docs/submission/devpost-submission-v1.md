@@ -1,7 +1,6 @@
-# Skill Crash-Test Arcade — Final Devpost Submission Copy v2
+# Skill Crash-Test Arcade — Final Devpost Submission Copy v3
 
-Use this document as the source of truth for the Devpost form. Replace every
-`TODO` before submission.
+Use this document as the source of truth for the Devpost form.
 
 ## General information
 
@@ -30,7 +29,7 @@ https://github.com/hangglider5/skill-crash-test-arcade
 
 ### Demo video
 
-TODO: public YouTube URL
+https://youtu.be/O-eEYYi42qc
 
 ### Codex feedback session
 
@@ -40,57 +39,44 @@ TODO: public YouTube URL
 
 ### Inspiration
 
-Coding agents are getting very good at completing the task they were asked to
-do. But a green focused test can hide a more dangerous failure: the agent may
-overwrite an unrelated draft, skip a full verification step, or claim success
-after an unproductive retry loop. Existing evals usually ask whether the final
-answer is correct. We wanted to ask a more operational question: **can we trust
-the workflow before it touches a real repository?**
+I kept coming back to a failure that ordinary coding-agent evaluations can miss:
+the requested bug is fixed, the focused test is green, but unrelated work was
+quietly damaged. A plausible final answer does not tell me whether the repository
+survived the workflow.
 
-That led to Skill Crash-Test Arcade—a local-first crash-test rig for normal,
-non-malicious Agent Skills. It makes reliability failures visible, reproducible,
-and a little theatrical: Skills enter an Arena, encounter deterministic fault
-cards, and earn a verdict backed by evidence rather than confidence.
+So I built Skill Crash-Test Arcade, a local-first crash-test rig for normal,
+non-malicious Agent Skills. It turns a reproducible repository fault into an
+arcade boss fight while keeping every verdict tied to evidence rather than model
+confidence.
 
 ### What it does
 
-Skill Crash-Test Arcade imports a Skill as a frozen, content-addressed snapshot
-and matches it against a controlled repository fixture. Codex with GPT-5.6 Sol
-runs the Skill inside a disposable workspace while the Arena records observable
-Trace events and artifacts.
+The app imports a Skill as a frozen, content-addressed snapshot and matches it
+against a controlled repository fixture. Codex runs the Skill with GPT-5.6 Sol
+inside a disposable workspace while the Arena records observable Trace events
+and artifacts. The Visual Arcade is driven by those persisted events: phase
+gates advance only when evidence exists, and its defeat or victory effects
+reflect the locked Judge result instead of invented client-side state.
 
-The Visual Arcade turns those persisted events into a trace-driven encounter:
-the imported Skill faces a Fault Boss, phase gates advance only when backed by
-evidence, and deterministic defeat or victory effects reflect the locked Judge
-result rather than decorative client-side state.
+The flagship match, **Dirty Tree Doppelgänger**, begins with an unrelated edit
+already present in `docs/roadmap.md`. The Skill fixes the target `slugify` bug and
+passes its focused tests, but overwrites that draft. Deterministic verifiers lock
+the result as `DEFEAT · 58/100`. GPT-5.6 Sol can diagnose why it happened, but it
+cannot grade itself or rewrite the verdict.
 
-The flagship fault card, **Dirty Tree Doppelgänger**, starts with an unrelated
-change already present in `docs/roadmap.md`. The tested Skill correctly fixes the
-target `slugify` bug and passes its focused tests—but overwrites that pre-existing
-draft. Independent deterministic verifiers lock the run as
-`DEFEAT · 58/100`. GPT-5.6 Sol can explain the evidence, but it cannot grade
-itself or rewrite the verdict.
+The app then creates a private repair fork containing a candidate `SKILL.md`
+change. The imported original stays read-only. After I review the diff and
+approve a rerun, the repaired Skill faces the same manifest, fixture, Runner,
+and parent run group. The draft survives, the score rises to `98/100`, and the
+comparison shows exactly what stayed fixed and what changed.
 
-The app then creates a private repair fork containing a candidate change to
-`SKILL.md` only. The original import remains read-only. After explicit human
-review and approval, the repaired Skill runs against the same manifest, fixture,
-runner configuration, and parent run group. The protected change survives, the
-score rises to `98/100`, and the Arena displays a controlled before/after
-comparison.
+### How I built it
 
-The MVP also defines two additional fault cards: **False Green Mirage**, which
-detects focused-test success that contradicts the full suite, and **Missing Tool
-Trap**, which tests bounded fallback behavior when a nonessential tool is absent.
+The project is a TypeScript application with a React/Vite Arena UI and a
+loopback-only Fastify Core. Core owns immutable imports, disposable Git fixtures,
+Codex execution, artifacts, repair authority, and sanitized report export.
 
-### How we built it
-
-The product is a TypeScript monorepo-style application with a React/Vite Arena
-UI and a loopback-only Fastify Core. Core owns imports, immutable snapshot
-identity, disposable Git fixtures, Codex process execution, event normalization,
-artifact storage, deterministic verifiers, repair authority, and sanitized
-report export.
-
-The central architecture deliberately separates three responsibilities:
+I separated the system into three responsibilities:
 
 1. **Codex Runner** — uses GPT-5.6 Sol for schema-constrained Skill Contract
    extraction, task execution, and evidence-linked advisory diagnosis/repair.
@@ -99,81 +85,67 @@ The central architecture deliberately separates three responsibilities:
 3. **Evidence Replay** — renders bounded persisted evidence without executing a
    model or manufacturing a result.
 
-Live execution uses the authenticated Codex CLI with the exact
-`gpt-5.6-sol` model. For judge-friendly, zero-credit testing, `pnpm demo` uses a
-development-only scripted adapter while still exercising the real fixture,
-orchestrator, trace, verifiers, repair review, and controlled rerun. A sanitized,
-checked-in Live Proof records an authorized production Codex + GPT-5.6 Sol smoke
-run with 5/5 verifiers passed and redaction complete.
+Live execution uses the authenticated Codex CLI with the exact `gpt-5.6-sol`
+model. For judges, `pnpm demo` uses a scripted Runner that consumes no model
+credits while exercising the real fixture, Trace, verifiers, repair review, and
+rerun. A sanitized Live Proof separately records an authorized production Codex
++ GPT-5.6 Sol run with 5/5 verifiers passed.
 
 ### How Codex and GPT-5.6 helped
 
-Codex was our primary full-stack engineering partner. It helped turn the initial
-product idea into an implementation plan, built the runner/judge/replay
-boundaries, implemented the React experience and Fastify Core, created
-repository fixtures and verifier protocols, diagnosed integration and browser
-issues, wrote regression tests, performed a real GPT-5.6 Sol live smoke, and
-polished the submission flow.
+I used Codex as my full-stack engineering partner from the first design sketch
+through the submission build. It helped plan the architecture, implement the
+React and Fastify surfaces, create fixtures and verifier protocols, diagnose
+browser and recording issues, write regression tests, and run an authorized
+GPT-5.6 Sol live smoke. The repository has 431 automated tests plus browser E2E.
 
-GPT-5.6 Sol also operates inside the product. It extracts a bounded Skill
-Contract, performs the task through Codex, and produces an advisory diagnosis and
-candidate Skill repair linked to locked evidence. We intentionally kept the
-model outside the scoring boundary: deterministic code decides whether a run is
-a victory or defeat.
+GPT-5.6 Sol also works inside the product. Through Codex, it extracts a bounded
+Skill Contract, performs the task, and proposes an evidence-linked diagnosis and
+repair. Deterministic code alone decides victory, defeat, or infrastructure
+error. The original stays immutable, work happens in disposable copies, and a
+human must approve the Skill-only repair before the rematch.
 
-The most important human decisions were architectural rather than cosmetic: the
-original Skill must remain immutable; all work must happen in disposable copies;
-repair authority must be narrow and require explicit approval; and a model must
-never be allowed to alter its own verdict.
+### Challenges I ran into
 
-### Challenges we ran into
+The hardest part was making the experience fun without weakening the evidence.
+A static replay can look convincing while proving nothing, but a raw agent trace
+is noisy and may expose sensitive data. I used bounded Trace projections,
+content-addressed artifacts, lineage checks, and a server-side redaction gate.
 
-The hardest problem was preserving a fun, legible product experience without
-weakening the evidence model. A static replay can look convincing but prove
-nothing, while raw agent traces are too noisy and can expose sensitive data. We
-therefore built bounded Trace projections, content-addressed artifact references,
-lineage checks, and a server-side redaction gate.
+Codex CLI integration required careful timeout/error separation, JSONL
+normalization, and model pinning. The repair loop raised another risk: implying
+causality from one comparison. The UI therefore says **observed improvement**
+and proves which inputs stayed fixed and which Skill snapshot changed.
 
-Codex CLI integration also required careful process handling: owned structured
-output files, timeout/error separation, JSONL normalization, model pinning, and
-preflight checks. Finally, the repair loop had to demonstrate improvement without
-overclaiming causality. The comparison UI therefore says **observed
-improvement** and proves which inputs stayed fixed and which Skill snapshot
-changed.
-
-### Accomplishments that we're proud of
+### Accomplishments I'm proud of
 
 - A complete defeat-to-diagnosis-to-reviewed-repair-to-victory loop.
-- A trace-driven Visual Arcade whose effects are projections of persisted events.
+- A trace-driven Visual Arcade whose effects come from persisted events.
 - Deterministic hard gates that override a model's completion claim.
-- Immutable imports and Skill-only repair forks with explicit human approval.
-- A reproducible `58 → 98` controlled comparison with locked lineage.
-- A real authorized GPT-5.6 Sol live proof with a sanitized public projection.
-- A zero-credit judge path that runs locally with one command.
-- 431 automated tests plus browser E2E and deterministic demo recording.
+- Immutable imports and Skill-only repair forks with explicit approval.
+- A reproducible `58 → 98` comparison with locked lineage.
+- An authorized GPT-5.6 Sol Live Proof with a sanitized public projection.
+- A one-command local demo that consumes no model credits.
 
-### What we learned
+### What I learned
 
 Agent reliability is not one score. Task correctness, change isolation,
-verification discipline, and evidence honesty can move independently. We also
-learned that model explanations are most useful after evidence is locked: GPT-5.6
-Sol is excellent at turning a verifier failure into an actionable Skill policy,
-but deterministic code should retain final authority.
+verification discipline, and evidence honesty can move independently. I also
+learned that model explanations become more useful after evidence is locked:
+GPT-5.6 Sol is good at turning a verifier failure into an actionable Skill
+policy, while deterministic code retains final authority.
 
-Most importantly, reproducibility needs a product surface. Hashes and traces
-matter, but people understand the safety property when they can see the original
-stay unchanged, review one bounded patch, explicitly approve a rerun, and compare
+Hashes and traces are necessary, but they are not enough on their own. The safety
+property became much easier to understand once I could show the original staying
+unchanged, one bounded patch being reviewed, an explicit rematch approval, and
 the two runs side by side.
 
 ### What's next
 
-Next we would add stronger container or VM isolation, durable run recovery,
-additional Skill formats and community import flows, richer fault-card authoring,
-and a larger library of repository-workflow scenarios. Electron packaging could
-provide a polished desktop distribution while keeping Codex, Git, fixtures, and
-evidence local. If time and budget allow, an optional agent-driven creative
-platform could generate shareable visual replays without entering the judging
-boundary.
+Next I would add stronger container or VM isolation, durable run recovery, more
+Skill formats, and a community library of repository-workflow fault cards.
+Electron packaging could make the local Codex, Git, fixture, and evidence stack
+easier to install without changing the deterministic judging boundary.
 
 ## Judge quick start
 
@@ -212,7 +184,7 @@ redaction check.
 ## Media checklist
 
 - [x] 3:2 thumbnail: `assets/devpost-thumbnail.png`
-- [ ] Public YouTube demo under three minutes
+- [x] Publicly accessible YouTube demo under three minutes
 - [x] Import Lobby / Live Proof screenshot: `01-import-live-proof.png`
 - [x] Visual Arcade defeat screenshot: `02-defeat-arena-v2.png`
 - [x] Skill-only repair screenshot: `03-skill-repair-review.png`
