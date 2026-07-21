@@ -107,6 +107,9 @@ export function RunScreen({
   const genericRisk = hasGenericRisk(visibleEvents);
   const finalVerdict = run.state === "completed" && verdict !== undefined
     && verdict.status !== "error" ? verdict : null;
+  const arenaOutcome = finalVerdict === null
+    ? run.state === "errored" ? { status: "error" as const } : undefined
+    : { status: finalVerdict.status, score: finalVerdict.score };
   let pendingLabel = "Run in progress";
   let pendingClass = "run-progress";
   if (run.state === "errored") {
@@ -137,7 +140,7 @@ export function RunScreen({
 
   return (
     <section aria-label={`${manifest.name} run`} className="run-screen">
-      <header className="run-status-bar">
+      <header className={`run-status-bar ${finalVerdict === null ? "" : `run-status-${finalVerdict.status}`}`}>
         <div>
           <span>RUN <code>{run.run_id}</code></span>
           <strong>{run.state.toUpperCase()}</strong>
@@ -159,6 +162,7 @@ export function RunScreen({
           events={visibleEvents}
           manifest={manifest}
           onSelectSeq={setSelectedSeq}
+          {...(arenaOutcome === undefined ? {} : { outcome: arenaOutcome })}
           selectedSeq={selectedEvent?.seq ?? null}
         />
         <EvidenceLab

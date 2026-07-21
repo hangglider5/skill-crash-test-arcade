@@ -1,6 +1,6 @@
-# Demo Video v1 — Narration and Shot List
+# Final Demo Video v2 — Narration and Shot List
 
-Target: **2:35–2:45**, English narration (347 words), 16:9 landscape, burned-in English captions, and no unlicensed music. The official submission must remain under three minutes.
+Final runtime: **2:43.6**, English narration (347 words), 1920×1080 landscape at 25 fps, burned-in English captions, and no unlicensed music. The official submission remains under three minutes.
 
 The automated UI master comes from:
 
@@ -8,9 +8,9 @@ The automated UI master comes from:
 pnpm demo:record
 ```
 
-Use the narration-paced MP4 as the primary evidence. VideoZero may supply the short 2D hook and architecture outro; HeyGen may supply an optional presenter intro, but neither should replace the real product recording.
+Use the narration-paced MP4 as the primary evidence. An eight-second generated title card and a twelve-second architecture card bookend the real product recording; the product remains the majority of the finished cut.
 
-The assembled first review cut and its editable source manifest are documented
+The assembled Visual Arcade v2 cut and its editable source manifest are documented
 in [`video-asset-package.md`](video-asset-package.md).
 
 ## English narration v1
@@ -43,7 +43,7 @@ in [`video-asset-package.md`](video-asset-package.md).
 
 | Time | Picture | Recording/edit action | Narration cue |
 |---|---|---|---|
-| 0:00–0:08 | Optional VideoZero kinetic title: `THE BUG IS FIXED. THE REPO ISN'T.` | Dark navy, cyan and violet; end on the Arcade “S” mark. | “A coding agent can fix…” |
+| 0:00–0:08 | Generated title card: `THE BUG IS FIXED. THE REPO ISN'T.` | Dark navy, cyan and violet; end on the Arcade “S” mark. | “A coding agent can fix…” |
 | 0:08–0:20 | Import Lobby hero and product name | Begin the real capture; hold the first viewport. | “Skill Crash-Test Arcade tests the Skill…” |
 | 0:20–0:34 | Compact Live Proof card; expand verified lineage briefly | Emphasize `LIVE · GPT-5.6 SOL`, `80/100`, and redaction complete. | “The checked-in Live Proof…” |
 | 0:34–0:48 | Click **Try the recorded crash test**; Sample tab and `Recorded Replay` appear | Keep the CTA click and Sample selection visible. | “For the demo, we select…” |
@@ -54,18 +54,18 @@ in [`video-asset-package.md`](video-asset-package.md).
 | 1:44–1:59 | Click **Create repair candidate** | Show `Changed paths: SKILL.md`, patch, and `Original unchanged`. | “The proposed repair changes only…” |
 | 1:59–2:12 | Explicitly click **Approve & Rerun**; Run Monitor reaches `VICTORY · 98/100` | Preserve the approval click and the returned victory screen. | “The repaired Skill runs…” |
 | 2:12–2:30 | Compare hero: `58 → 98`, then controlled-comparison proof | Show same Manifest, fixture, Runner, parent lineage, and changed Skill Snapshot. | “This comparison is observed improvement…” |
-| 2:30–2:42 | Optional VideoZero architecture outro: `CODEX RUNNER → DETERMINISTIC JUDGE → EVIDENCE REPLAY` | Add repository URL and `Local-first · Original unchanged`. | “Codex accelerated…” through final line. |
+| 2:30–2:43.6 | Architecture outro: `CODEX RUNNER → DETERMINISTIC JUDGE → EVIDENCE REPLAY` | Hold the repository URL and `Local-first · Original unchanged` through the end. | “Codex accelerated…” through final line. |
 
 ## Capture checklist
 
 - [ ] Run `pnpm demo:record` from a clean checkout.
-- [ ] Confirm both WebM and 1080p MP4 exist under `artifacts/demo/`.
-- [ ] Confirm the raw recording shows `58/100`, `98/100`, and the final controlled comparison.
-- [ ] Keep the app recording as the majority of the finished video.
-- [ ] Record or generate the English narration after the visual cut is locked.
-- [ ] Burn in English captions; manually correct `GPT-5.6 Sol`, `SKILL.md`, and `docs/roadmap.md`.
-- [ ] Do not include tokens, local filesystem paths, raw Trace data, or unpublished artifacts.
-- [ ] Do not use copyrighted music or third-party brand footage without permission.
-- [ ] Export H.264, 1920×1080, 30 or 60 fps, with AAC audio.
-- [ ] Keep the final duration below 2:50 to preserve a safety margin under the three-minute limit.
+- [x] Confirm both WebM and 1080p MP4 exist under `artifacts/demo/`.
+- [x] Confirm the raw recording shows `58/100`, `98/100`, and the final controlled comparison.
+- [x] Keep the app recording as the majority of the finished video.
+- [x] Record or generate the English narration after the visual cut is locked.
+- [x] Burn in English captions; manually correct `GPT-5.6 Sol`, `SKILL.md`, and `docs/roadmap.md`.
+- [x] Do not include tokens, local filesystem paths, raw Trace data, or unpublished artifacts.
+- [x] Do not use copyrighted music or third-party brand footage without permission.
+- [x] Export H.264, 1920×1080 at 25 fps, with AAC audio.
+- [x] Keep the final duration below 2:50 to preserve a safety margin under the three-minute limit.
 - [ ] Watch the uploaded YouTube version once at 1080p with captions enabled.

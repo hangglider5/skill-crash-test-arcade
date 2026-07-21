@@ -94,6 +94,10 @@ function scoreLabel(verdict: SanitizedVerdict): string {
   return verdict.status === "error" ? "—" : String(verdict.score);
 }
 
+function scoreValue(verdict: SanitizedVerdict): number | null {
+  return verdict.status === "error" ? null : verdict.score;
+}
+
 function sameRunner(left: RunEnvelope, right: RunEnvelope): boolean {
   return left.runner.adapter === right.runner.adapter && left.runner.model === right.runner.model;
 }
@@ -272,6 +276,11 @@ export function VerdictCompare(props: VerdictCompareProps): React.JSX.Element {
   const patchText = repair?.patch?.text ?? "";
   const patchTruncated = patchText.length > MAX_PATCH_PREVIEW_CHARS;
   const controlledComparison = comparisonIsControlled(baseline, props.child, repair);
+  const baselineScore = scoreValue(verdict);
+  const childScore = props.child === undefined ? null : scoreValue(props.child.verdict);
+  const scoreDelta = controlledComparison && baselineScore !== null && childScore !== null
+    ? childScore - baselineScore
+    : null;
   const exportBlocked = baseline.redaction_complete !== true || !controlledComparison;
 
   return (
@@ -282,6 +291,13 @@ export function VerdictCompare(props: VerdictCompareProps): React.JSX.Element {
             <p className="locked-label">Deterministic verdicts · LINEAGE LOCKED</p>
             <h1 id="verdict-title">Controlled improvement</h1>
             <p>Same fixture and Runner; only the explicitly approved Skill repair changed.</p>
+            {scoreDelta === null ? null : (
+              <div className="score-delta" aria-label={`${scoreDelta} point observed improvement`}>
+                <span aria-hidden="true">↗</span>
+                <strong>+{scoreDelta}</strong>
+                <small>OBSERVED POINTS</small>
+              </div>
+            )}
           </div>
           <div aria-label="Controlled score improvement" className="comparison-score-flow">
             <div
@@ -301,7 +317,10 @@ export function VerdictCompare(props: VerdictCompareProps): React.JSX.Element {
                 </span>
               ))}
             </div>
-            <span aria-hidden="true" className="comparison-arrow">→</span>
+            <span aria-hidden="true" className="comparison-arrow">
+              <i />
+              <b>REMATCH</b>
+            </span>
             <div
               aria-label={`Repaired Skill: ${props.child.verdict.status}, ${scoreLabel(props.child.verdict)} out of 100`}
               className="comparison-score repaired-score"
@@ -316,10 +335,15 @@ export function VerdictCompare(props: VerdictCompareProps): React.JSX.Element {
         <header className="verdict-hero">
           <div>
             <p className="locked-label">Deterministic verdict · LOCKED</p>
-            <h1 id="verdict-title">{statusLabel(verdict)}</h1>
-            {verdict.status === "error"
-              ? <code className="verdict-error-code">{verdict.error.code}</code>
-              : <strong className="verdict-score">{verdict.score} / 100</strong>}
+            <div className="verdict-title-lockup">
+              <span aria-hidden="true" className="verdict-emblem"><i /></span>
+              <div>
+                <h1 id="verdict-title">{statusLabel(verdict)}</h1>
+                {verdict.status === "error"
+                  ? <code className="verdict-error-code">{verdict.error.code}</code>
+                  : <strong className="verdict-score">{verdict.score} / 100</strong>}
+              </div>
+            </div>
           </div>
           <div className="hard-gate-summary">
             <span>Hard gates</span>

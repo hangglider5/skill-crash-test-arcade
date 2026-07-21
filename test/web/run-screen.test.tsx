@@ -586,5 +586,9 @@ describe("RunScreen", () => {
 
     expect(screen.getByText("58/100")).toBeVisible();
     expect(screen.getByText("DEFEAT")).toBeVisible();
+    const arena = screen.getByRole("region", { name: "Trace Arena" });
+    expect(arena).toHaveClass("arena-tone-defeat");
+    expect(within(arena).getByText("58 PTS")).toBeVisible();
+    expect(within(arena).getByText("HARD GATE DEFEAT")).toBeVisible();
   });
 });

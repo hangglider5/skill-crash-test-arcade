@@ -44,7 +44,7 @@ The recorder starts the local scripted demo, pauses on the important evidence at
 - `skill-crash-test-arcade-demo-silent.webm` — original Playwright capture at 1600×900;
 - `skill-crash-test-arcade-demo-silent-1080p.mp4` — H.264 1920×1080 editing master when FFmpeg is installed.
 
-The capture intentionally has no audio. Add the approved English narration and captions during editing. The first narration draft and shot list are in [`docs/submission/demo-video-v1.md`](docs/submission/demo-video-v1.md).
+The capture intentionally has no audio. Add the approved English narration and captions during editing. The final Visual Arcade timing, narration, shot list, and media checks are documented in [`docs/submission/demo-video-v1.md`](docs/submission/demo-video-v1.md) and [`docs/submission/video-asset-package.md`](docs/submission/video-asset-package.md).
 
 ## Quick start
 
@@ -171,7 +171,7 @@ Browser export is enabled only after an approved controlled comparison and `reda
 - **Redaction block:** export remains disabled when `redaction_complete` is false or missing. Inspect only local artifacts, remove the sensitive/unsupported evidence source, and rerun; do not bypass the report gate.
 - **Playwright cannot bind loopback:** run `pnpm test:e2e` outside a filesystem/network sandbox that denies local server sockets, and install Chromium once with `pnpm exec playwright install chromium`.
 
-## OpenAI Build Week demo (about 3 minutes)
+## OpenAI Build Week demo (2:43.6)
 
 1. Open the tokenized local URL and choose **Sample**; point out **Recorded Replay**, **LOCKED Snapshot**, and “preservation unspecified.”
 2. Start Dirty Tree as a Live Run and show trace-driven arena activity plus the Evidence Lab.
@@ -182,18 +182,19 @@ Browser export is enabled only after an approved controlled comparison and `reda
 
 ## Devpost submission checklist
 
-- [ ] Project name and elevator pitch
-- [ ] 3:2 project thumbnail (`assets/devpost-thumbnail.png`)
-- [ ] Complete project story: inspiration, what it does, how it was built, challenges, accomplishments, learnings, and next steps
+- [x] Project name and elevator pitch
+- [x] 3:2 project thumbnail (`assets/devpost-thumbnail.png`)
+- [x] Complete project story: inspiration, what it does, how it was built, challenges, accomplishments, learnings, and next steps
 - [x] Public source repository URL and an OSI-compatible MIT repository license
-- [ ] Working demo URL or clear local-install instructions
-- [ ] Short demo video showing the complete Dirty Tree defeat-to-victory loop
-- [ ] Screenshots of Import Lobby, 58-point defeat/evidence, Skill-only patch review, and controlled victory proof
-- [ ] OpenAI technology disclosure: Codex CLI, GPT-5.6 Sol, schema-constrained outputs, and deterministic judging boundary
+- [x] Working demo URL or clear local-install instructions
+- [x] Short local demo master showing the complete Dirty Tree defeat-to-victory loop
+- [x] Screenshots of Import Lobby, 58-point defeat/evidence, Skill-only patch review, and controlled victory proof
+- [x] OpenAI technology disclosure: Codex CLI, GPT-5.6 Sol, schema-constrained outputs, and deterministic judging boundary
 - [ ] Build Week category/tags and individual team-member details
-- [ ] Trust model, non-malware limitation, privacy/local-first behavior, and original-source guarantee
-- [ ] `pnpm typecheck`, `pnpm test`, `pnpm test:e2e`, `pnpm build`, and built-server smoke results recorded
-- [ ] One authorized `pnpm smoke:live` result with run ID, terminal status/score, Trace path, and sanitized report path
+- [x] Trust model, non-malware limitation, privacy/local-first behavior, and original-source guarantee
+- [x] `pnpm typecheck`, `pnpm test`, `pnpm test:e2e`, `pnpm build`, and built-server smoke results recorded
+- [x] One authorized `pnpm smoke:live` result with run ID, terminal status/score, Trace path, and sanitized report path
+- [ ] Captioned demo uploaded publicly and checked after YouTube finishes 1080p processing
 - [ ] Submission preview checked for working links, readable media, correct attribution, and no tokens/local paths/secrets
 
 ## Current boundary and next steps

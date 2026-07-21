@@ -214,6 +214,7 @@ describe("VerdictCompare", () => {
     expect(screen.getByRole("heading", { name: "Failed verifier evidence" })).toBeVisible();
     expect(screen.queryByText(/consequential|failure chain/i)).not.toBeInTheDocument();
     expect(screen.getByText("Observed improvement")).toBeVisible();
+    expect(screen.getByLabelText("33 point observed improvement")).toHaveTextContent("+33");
     expect(screen.queryByText("Causal proof")).not.toBeInTheDocument();
 
     const dimensions = screen.getByRole("region", { name: "Dimension scores" });

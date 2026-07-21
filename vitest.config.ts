@@ -12,6 +12,7 @@ export default defineConfig({
         test: {
           name: "node",
           environment: "node",
+          maxWorkers: 1,
           include: [
             "test/protocol/**/*.test.ts",
             "test/arena/**/*.test.ts",

@@ -1,4 +1,4 @@
-# Skill Crash-Test Arcade — Devpost Submission Copy v1
+# Skill Crash-Test Arcade — Final Devpost Submission Copy v2
 
 Use this document as the source of truth for the Devpost form. Replace every
 `TODO` before submission.
@@ -58,6 +58,11 @@ Skill Crash-Test Arcade imports a Skill as a frozen, content-addressed snapshot
 and matches it against a controlled repository fixture. Codex with GPT-5.6 Sol
 runs the Skill inside a disposable workspace while the Arena records observable
 Trace events and artifacts.
+
+The Visual Arcade turns those persisted events into a trace-driven encounter:
+the imported Skill faces a Fault Boss, phase gates advance only when backed by
+evidence, and deterministic defeat or victory effects reflect the locked Judge
+result rather than decorative client-side state.
 
 The flagship fault card, **Dirty Tree Doppelgänger**, starts with an unrelated
 change already present in `docs/roadmap.md`. The tested Skill correctly fixes the
@@ -139,6 +144,7 @@ changed.
 ### Accomplishments that we're proud of
 
 - A complete defeat-to-diagnosis-to-reviewed-repair-to-victory loop.
+- A trace-driven Visual Arcade whose effects are projections of persisted events.
 - Deterministic hard gates that override a model's completion claim.
 - Immutable imports and Skill-only repair forks with explicit human approval.
 - A reproducible `58 → 98` controlled comparison with locked lineage.
@@ -207,10 +213,11 @@ redaction check.
 
 - [x] 3:2 thumbnail: `assets/devpost-thumbnail.png`
 - [ ] Public YouTube demo under three minutes
-- [ ] Import Lobby / Live Proof screenshot
-- [ ] `DEFEAT · 58/100` evidence screenshot
-- [ ] Skill-only repair screenshot
-- [ ] `58 → 98` controlled comparison screenshot
-- [ ] Confirm captions spell `GPT-5.6 Sol`, `SKILL.md`, and `docs/roadmap.md`
-- [ ] Confirm no token, local path, raw Trace, or unpublished artifact is visible
+- [x] Import Lobby / Live Proof screenshot: `01-import-live-proof.png`
+- [x] Visual Arcade defeat screenshot: `02-defeat-arena-v2.png`
+- [x] Skill-only repair screenshot: `03-skill-repair-review.png`
+- [x] Visual Arcade victory screenshot: `05-victory-arena-v2.png`
+- [x] `58 → 98` controlled comparison screenshot: `04-controlled-improvement-v2.png`
+- [x] Confirm captions spell `GPT-5.6 Sol`, `SKILL.md`, and `docs/roadmap.md`
+- [x] Confirm no token, local path, raw Trace, or unpublished artifact is visible
 - [ ] Preview every public link from a signed-out browser

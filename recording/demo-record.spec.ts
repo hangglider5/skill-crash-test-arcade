@@ -112,7 +112,9 @@ test("records the submission-ready Dirty Tree product walkthrough", async ({ pag
   await expect(defeat).toBeVisible();
   await expect(page.locator(".locked-live-verdict").getByText("58/100", { exact: true }))
     .toBeVisible();
-  await spotlight(page, page.locator(".locked-live-verdict"), 5_500);
+  const defeatArena = page.locator(".arena-stage.arena-tone-defeat");
+  await expect(defeatArena.getByText("HARD GATE DEFEAT", { exact: true })).toBeVisible();
+  await spotlight(page, defeatArena, 5_500);
 
   await page.getByRole("button", { name: "Compare" }).click();
   await expect(page.getByRole("heading", { name: "DEFEAT", exact: true })).toBeVisible();
@@ -143,14 +145,16 @@ test("records the submission-ready Dirty Tree product walkthrough", async ({ pag
   await expect(victory).toBeVisible();
   await expect(page.locator(".locked-live-verdict").getByText("98/100", { exact: true }))
     .toBeVisible();
-  await spotlight(page, page.locator(".locked-live-verdict"), 6_000);
+  const victoryArena = page.locator(".arena-stage.arena-tone-victory");
+  await expect(victoryArena.getByText("VERIFIED VICTORY", { exact: true })).toBeVisible();
+  await spotlight(page, victoryArena, 6_000);
 
   await page.getByRole("button", { name: "Compare" }).click();
   const controlledHeading = page.getByRole("heading", { name: "Controlled improvement" });
   await expect(controlledHeading).toBeVisible();
   await expect(page.getByLabel("Baseline: defeat, 58 out of 100")).toBeVisible();
   await expect(page.getByLabel("Repaired Skill: victory, 98 out of 100")).toBeVisible();
-  await hold(page, 7_500);
+  await spotlight(page, page.locator(".comparison-hero"), 7_500);
 
   const comparisonProof = page.getByRole("list", { name: "Comparison proof" });
   await spotlight(page, comparisonProof, 7_500);
